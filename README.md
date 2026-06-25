@@ -28,6 +28,7 @@ no JavaScript or CSS required.
 ├── requirements.txt      # yfinance, pandas
 ├── .dockerignore         # keeps the build context lean
 ├── .gitignore
+├── docs/SPEC.md          # original project spec / requirements
 ├── data/                 # Deephaven data root — git-ignored, created at runtime
 └── scripts/              # Python scripts — mounted into the IDE "Notebooks" panel
 ```
@@ -63,7 +64,7 @@ The scenario + dashboard logic is intended to live in
 `/data/storage/notebooks`, any file you drop there shows up in the IDE's
 **Notebooks** panel, ready to run against the engine.
 
-Intended flow (per the project spec):
+Intended flow (per the [project spec](docs/SPEC.md)):
 
 1. **Data acquisition** — download ~10 years of Intel (`INTC`) history with
    `yfinance`, then reset the DataFrame index.
