@@ -35,8 +35,6 @@ no JavaScript or CSS required.
 ## Prerequisites
 
 - **Docker Engine + Docker Compose v2** — verify with `docker compose version`.
-  (Not yet installed on this machine — install Docker Desktop, Colima, or
-  Docker Engine first.)
 - No API keys or cloud accounts required.
 
 ## Getting started
