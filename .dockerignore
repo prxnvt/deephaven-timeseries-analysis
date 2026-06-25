@@ -1,0 +1,13 @@
+# Keep the Docker build context small — only requirements.txt is needed to build.
+.git
+.gitignore
+data/
+scripts/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/
+README.md

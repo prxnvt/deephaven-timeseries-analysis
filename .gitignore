@@ -1,0 +1,29 @@
+# --- Local runtime data ---
+# Deephaven /data mount + any downloaded market data. Recreated at runtime.
+data/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+# --- OS ---
+.DS_Store
+.DS_Store?
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+
+# --- Editors / IDEs ---
+.idea/
+.vscode/
+*.swp
+*~

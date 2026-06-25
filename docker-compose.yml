@@ -1,0 +1,27 @@
+# Local Deephaven "what-if" stack.
+# Builds the custom image (Deephaven server + yfinance) and serves the web IDE.
+#
+# Usage:
+#   docker compose up -d            # build + start in the background
+#   docker compose logs -f          # follow logs (incl. the pre-shared key)
+#   docker compose down             # stop and remove the container
+services:
+  deephaven:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: deephaven-timeseries
+    ports:
+      - "10000:10000"                         # Web IDE -> http://localhost:10000/ide
+    volumes:
+      - ./data:/data                          # Deephaven data root (persisted on the host)
+      - ./scripts:/data/storage/notebooks     # Project scripts appear in the IDE "Notebooks" panel
+    restart: unless-stopped
+
+    # Deephaven requires authentication. By default it generates a random
+    # pre-shared key (PSK) on startup, printed in the container logs:
+    #   docker compose logs deephaven | grep -i "pre-shared key"
+    #
+    # To pin your own fixed key instead, uncomment the block below:
+    # environment:
+    #   - START_OPTS=-Dauthentication.psk=CHANGE_ME_local_dev_key
