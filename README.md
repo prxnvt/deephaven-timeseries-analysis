@@ -1,15 +1,20 @@
 # Deephaven Time-Series Analysis — Stock "What-If" Engine
 
-A local, containerized [Deephaven](https://deephaven.io) stack for running
-stock-market **"what-if"** scenarios over historical price data. Historical
-prices are pulled for free from Yahoo Finance via
-[`yfinance`](https://github.com/ranaroussi/yfinance), loaded into a live
-Deephaven table, and explored through a reactive `deephaven.ui` dashboard —
-no JavaScript or CSS required.
+A local, containerized [Deephaven](https://deephaven.io) stack for stock-market
+**"what-if"** analysis over historical price data. Prices are pulled for free from
+Yahoo Finance via [`yfinance`](https://github.com/ranaroussi/yfinance), loaded into
+live Deephaven tables, and explored through reactive `deephaven.ui` dashboards — no
+JavaScript or CSS required. Two dashboards ship:
 
-> **Status:** working. The full stack builds and runs, and the what-if dashboard
-> in [`scripts/what_if_dashboard.py`](scripts/what_if_dashboard.py) is implemented
-> and verified end-to-end against the live engine (Deephaven 41.7).
+- **[`market_sim_dashboard.py`](scripts/market_sim_dashboard.py)** — a full trading
+  **simulator**: pick one of ~20 free-data tickers and a strategy, set capital and
+  parameters, and watch it trade against an *unfolding* historical market (animated
+  with Deephaven `TableReplayer`) on a Sunbird-style multi-panel board.
+- **[`what_if_dashboard.py`](scripts/what_if_dashboard.py)** — the simpler baseline:
+  two price sliders over a single INTC table.
+
+> **Status:** working. The stack builds and runs, and both dashboards are
+> implemented and verified end-to-end against the live engine (Deephaven 41.7).
 
 ## Stack
 
@@ -32,7 +37,8 @@ no JavaScript or CSS required.
 ├── docs/SPEC.md          # original project spec / requirements
 ├── data/                 # Deephaven data root — git-ignored, created at runtime
 └── scripts/              # mounted into the IDE "Notebooks" panel
-    └── what_if_dashboard.py   # the INTC what-if dashboard (run this in the IDE)
+    ├── market_sim_dashboard.py  # trading simulator (20 tickers, strategies, replay)
+    └── what_if_dashboard.py     # simpler INTC buy/sell-price what-if
 ```
 
 ## Prerequisites
@@ -59,32 +65,44 @@ no JavaScript or CSS required.
 > Tip: to skip the per-restart key lookup, pin a fixed PSK by uncommenting the
 > `environment` block in `docker-compose.yml`.
 
-## Using the dashboard
+## The market simulator
 
-The what-if dashboard lives in
-[`scripts/what_if_dashboard.py`](scripts/what_if_dashboard.py). Because
-`./scripts` is mounted to `/data/storage/notebooks`, it appears in the IDE's
-**Notebooks** panel. To run it:
+[`scripts/market_sim_dashboard.py`](scripts/market_sim_dashboard.py) is the
+flagship — a trading simulator that backtests a strategy against an *unfolding*
+historical market. Because `./scripts` is mounted to `/data/storage/notebooks`, it
+appears in the IDE **Notebooks** panel; open it and run it to bind `dashboard`, a
+multi-panel board.
 
-1. Open the IDE (<http://localhost:10000/ide>) and authenticate.
-2. In the **Notebooks** file browser, open `what_if_dashboard.py` and run it.
-3. A `dashboard` panel renders: two sliders (buy / sell price) above a live
-   results table. Drag a slider and the table + qualifying-day count recompute
-   instantly.
+- **Universe** — ~20 large-cap tickers (`AAPL`, `MSFT`, `NVDA`, …) downloaded once
+  via one batched `yfinance` call and cached under `data/`.
+- **Strategies** (dropdown) — SMA crossover, buy-the-dip, and dollar-cost
+  averaging. Every trade fills at the day's market `Close` (no manual buy price).
+- **Unfolding replay** — the chosen run's full backtest is precomputed, then
+  revealed over a ~90s wall-clock window via `TableReplayer`; every panel updates
+  live as the market "unfolds."
+- **Controls** — ticker, strategy, initial capital, per-strategy parameters, date
+  range, and a Restart button.
+- **Panels** — six live KPI cards (final value, total return, vs buy-&-hold, max
+  drawdown, # buys, win rate), an equity curve vs buy-&-hold, price + MA overlays
+  with buy/sell markers, an exposure (in-market vs cash) area chart, a live trade
+  log, and a monthly-returns bar chart.
 
-What it does (per the [project spec](docs/SPEC.md)):
+How it works: the path-dependent backtest is computed in pandas/numpy (signals,
+positions with a one-bar execution lag, equity, drawdown), converted to a Deephaven
+table, given a compressed `ReplayTime` column, and replayed; charts
+(`deephaven.plot.express`) and KPI cards (`use_cell_data`) bind to the replaying
+table. The `TableReplayer` lifecycle is managed inside the `@ui.component` with
+`use_effect`/`use_ref`.
 
-1. **Data acquisition** — downloads ~10 years of Intel (`INTC`) history with
-   `yfinance` and flattens its `(field, ticker)` column MultiIndex.
-2. **Integration** — converts the pandas DataFrame into a Deephaven table via
-   `deephaven.pandas.to_table`.
-3. **Scenario engine** — `calculate_profit(buy, sell)` keeps rows where
-   `Close <= buy_price` and adds `Simulated_Profit = sell_price - Close`.
-4. **UI** — an `@ui.component` with `ui.use_state` buy/sell prices, two
-   `ui.slider` controls, `ui.use_memo` for reactive recompute, and a `ui.flex`
-   layout holding the sliders and `ui.table`.
+## The simple what-if dashboard
 
-> Runs entirely on free historical data — no API keys. The script needs outbound
+[`scripts/what_if_dashboard.py`](scripts/what_if_dashboard.py) is the original,
+simpler baseline (per the [project spec](docs/SPEC.md)): ~10 years of Intel
+(`INTC`) loaded via `deephaven.pandas.to_table`, with two `ui.slider` controls
+driving `calculate_profit(buy, sell)` — it keeps days where `Close <= buy_price`
+and adds `Simulated_Profit = sell_price - Close`, recomputing reactively.
+
+> Both run entirely on free historical data — no API keys. They need outbound
 > internet (from the container) for the one-time `yfinance` download.
 
 ## Notes
@@ -96,6 +114,6 @@ What it does (per the [project spec](docs/SPEC.md)):
 
 ## Roadmap
 
-- **Now:** static historical backtests.
-- **Later (optional):** stream live, ticking market data (e.g. Alpaca, Alpha
-  Vantage) into the engine for real-time scenarios.
+- **Done:** historical backtests + an animated `TableReplayer` "unfolding market."
+- **Later (optional):** multi-ticker portfolios, more strategies, and streaming
+  live ticking market data (e.g. Alpaca, Alpha Vantage) into the engine.
