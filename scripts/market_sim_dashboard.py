@@ -28,7 +28,6 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-from deephaven import agg
 from deephaven import pandas as dhpd
 from deephaven import ui
 import deephaven.plot.express as dx
@@ -322,13 +321,6 @@ def build_run(ticker, strategy, params, capital, start, end):
         "exposure_fig": exposure_fig,
         "periodic_fig": periodic_fig,
         "trade_log": trade_log,
-        # one-row / aggregate tables that tick with the replay -> live KPI cards
-        "kpi_final": live.tail(1).view(["V = Strategy_Equity"]),
-        "kpi_ret": live.tail(1).view([f"V = Strategy_Equity / {capital:.6f} - 1.0"]),
-        "kpi_vsbh": live.tail(1).view(["V = Strategy_Equity / BuyHold_Equity - 1.0"]),
-        "kpi_dd": live.agg_by([agg.min_("V = Drawdown")]),
-        "kpi_ntr": live.where("Trade = `BUY`").agg_by([agg.count_("V")]),
-        "win_rate": stats["win_rate"],
         "stats": stats,
     }, replayer
 
@@ -428,14 +420,16 @@ def market_sim():
 
     ui.use_effect(_effect, [config_key])
 
-    # Live KPI values (sentinel shown until the first replayed row arrives).
+    # Final backtest KPIs: static values from the precomputed run (no per-tick
+    # table-listener hooks — those raced the replay and crashed the render).
     ready = run is not None and "error" not in run
-    final_v = ui.use_cell_data(run["kpi_final"] if ready else None, sentinel=float(capital))
-    ret_v = ui.use_cell_data(run["kpi_ret"] if ready else None, sentinel=0.0)
-    vsbh_v = ui.use_cell_data(run["kpi_vsbh"] if ready else None, sentinel=0.0)
-    dd_v = ui.use_cell_data(run["kpi_dd"] if ready else None, sentinel=0.0)
-    ntr_v = ui.use_cell_data(run["kpi_ntr"] if ready else None, sentinel=0)
-    win_rate = run["win_rate"] if ready else None
+    stats = run["stats"] if ready else {}
+    final_v = stats.get("final_value")
+    ret_v = stats.get("total_return")
+    vsbh_v = stats.get("vs_bh")
+    dd_v = stats.get("max_drawdown")
+    ntr_v = stats.get("n_trades")
+    win_rate = stats.get("win_rate")
 
     # ---- Controls panel ----
     if strategy == "sma":

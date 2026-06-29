@@ -82,17 +82,17 @@ multi-panel board.
   live as the market "unfolds."
 - **Controls** — ticker, strategy, initial capital, per-strategy parameters, date
   range, and a Restart button.
-- **Panels** — six live KPI cards (final value, total return, vs buy-&-hold, max
+- **Panels** — six KPI cards (final value, total return, vs buy-&-hold, max
   drawdown, # buys, win rate), an equity curve vs buy-&-hold, price + MA overlays
   with buy/sell markers, an exposure (in-market vs cash) area chart, a live trade
   log, and a monthly-returns bar chart.
 
 How it works: the path-dependent backtest is computed in pandas/numpy (signals,
 positions with a one-bar execution lag, equity, drawdown), converted to a Deephaven
-table, given a compressed `ReplayTime` column, and replayed; charts
-(`deephaven.plot.express`) and KPI cards (`use_cell_data`) bind to the replaying
-table. The `TableReplayer` lifecycle is managed inside the `@ui.component` with
-`use_effect`/`use_ref`.
+table, given a compressed `ReplayTime` column, and replayed. The charts
+(`deephaven.plot.express`) and trade log bind to the replaying table and animate as
+it unfolds; the KPI cards show the final backtest result. The `TableReplayer`
+lifecycle is managed inside the `@ui.component` with `use_effect`/`use_ref`.
 
 ## The simple what-if dashboard
 
