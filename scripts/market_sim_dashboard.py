@@ -9,9 +9,10 @@ monthly returns.
 
 Architecture (see docs and the project plan):
   * Universe downloaded once via yfinance (multi-ticker) -> tidy long DataFrame.
+  * Data + backtest math live in the `marketlab` package (pure pandas/numpy,
+    unit-tested, no Deephaven imports); this script is the thin Deephaven layer.
   * For the selected (ticker, strategy, params, capital, date-range) the FULL backtest is
-    precomputed in pandas/numpy (path-dependent math is trivial there), producing one
-    enriched per-date frame.
+    precomputed via marketlab.backtest.run_backtest, producing one enriched per-date frame.
   * A synthetic, compressed `ReplayTime` Instant column maps ~years of bars into a short
     wall-clock window; `TableReplayer` then reveals rows over time. Charts + KPIs bind to
     the replaying table and update live.
@@ -26,7 +27,9 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+
+from marketlab.backtest import STRATEGY_OVERLAYS, run_backtest
+from marketlab.data import load_universe, slice_universe
 
 from deephaven import pandas as dhpd
 from deephaven import ui
@@ -35,13 +38,6 @@ from deephaven.replay import TableReplayer
 from deephaven.time import to_j_instant
 
 # --- Configuration -----------------------------------------------------------
-TICKERS = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "BRK-B", "JPM", "V", "UNH",
-    "XOM", "JNJ", "WMT", "PG", "MA", "HD", "KO", "PEP", "COST", "CVX",
-]
-HISTORY_START = "2014-01-01"
-HISTORY_END = "2024-01-01"
-MIN_ROWS = 200                       # drop a ticker with less history than this
 REPLAY_SECONDS = 90.0                # wall-clock duration of the animated replay
 CACHE_PATH = "/data/universe_cache.parquet"   # /data is the container's mounted volume
 
@@ -50,54 +46,11 @@ STRATEGY_LABELS = {
     "dip": "Buy the Dip",
     "dca": "Dollar-Cost Averaging",
 }
-OVERLAYS = {"sma": ["SMA_fast", "SMA_slow"], "dip": ["RecentHigh"], "dca": []}
 RANGE_KEYS = ["Max", "5Y", "3Y", "1Y"]
 
 
-# --- Data layer (downloaded once at module load) -----------------------------
-def _download_universe() -> pd.DataFrame:
-    """Download the 20-ticker basket and reshape to tidy long form.
-
-    Columns: Date, Ticker, Open, High, Low, Close, Volume.
-    """
-    raw = yf.download(
-        TICKERS, start=HISTORY_START, end=HISTORY_END,
-        auto_adjust=True, group_by="ticker", progress=False,
-    )
-    if raw is None or raw.empty:
-        raise RuntimeError("yfinance returned no data; check the container's network.")
-    # group_by='ticker' yields a (Ticker, Field) column MultiIndex; stack level 0.
-    long_df = (
-        raw.stack(level=0, future_stack=True)
-        .rename_axis(["Date", "Ticker"])
-        .reset_index()
-    )
-    long_df = long_df[["Date", "Ticker", "Open", "High", "Low", "Close", "Volume"]]
-    long_df = long_df.dropna(subset=["Close"])
-    long_df["Ticker"] = long_df["Ticker"].astype(str)
-    # Drop tickers with too little history (keeps the basket clean / picker honest).
-    counts = long_df.groupby("Ticker")["Close"].transform("size")
-    long_df = long_df[counts >= MIN_ROWS].reset_index(drop=True)
-    return long_df
-
-
-def _load_universe() -> pd.DataFrame:
-    """Load the universe from the local parquet cache, else download and cache it."""
-    try:
-        cached = pd.read_parquet(CACHE_PATH)
-        if not cached.empty:
-            return cached
-    except Exception:
-        pass
-    long_df = _download_universe()
-    try:
-        long_df.to_parquet(CACHE_PATH, index=False)
-    except Exception:
-        pass  # caching is best-effort; never block on it
-    return long_df
-
-
-PRICES_LONG = _load_universe()
+# --- Data layer (downloaded once at module load, via marketlab.data) ---------
+PRICES_LONG = load_universe(CACHE_PATH)
 AVAILABLE_TICKERS = sorted(PRICES_LONG["Ticker"].unique())
 DATE_MIN = pd.Timestamp(PRICES_LONG["Date"].min())
 DATE_MAX = pd.Timestamp(PRICES_LONG["Date"].max())
@@ -112,158 +65,6 @@ def _resolve_range(range_key: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     else:  # "Max"
         start = DATE_MIN
     return start, end
-
-
-# --- Strategies (return a desired 0/1 position series, lookahead handled here) -
-def _sma_signals(df: pd.DataFrame, fast: int, slow: int):
-    sma_fast = df["Close"].rolling(fast, min_periods=fast).mean()
-    sma_slow = df["Close"].rolling(slow, min_periods=slow).mean()
-    desired = (sma_fast > sma_slow).fillna(False).astype(int).to_numpy()
-    overlays = {"SMA_fast": sma_fast.to_numpy(), "SMA_slow": sma_slow.to_numpy()}
-    return desired, overlays
-
-
-def _dip_signals(df: pd.DataFrame, drop_pct: float, recover_pct: float, lookback: int):
-    close = df["Close"].to_numpy()
-    recent_high = df["Close"].rolling(lookback, min_periods=1).max().to_numpy()
-    n = len(close)
-    desired = np.zeros(n, dtype=int)
-    in_mkt = False
-    entry = 0.0
-    for i in range(n):
-        if not in_mkt and close[i] <= recent_high[i] * (1.0 - drop_pct / 100.0):
-            in_mkt = True
-            entry = close[i]
-        elif in_mkt and close[i] >= entry * (1.0 + recover_pct / 100.0):
-            in_mkt = False
-        desired[i] = 1 if in_mkt else 0
-    return desired, {"RecentHigh": recent_high}
-
-
-# --- Portfolio accounting ----------------------------------------------------
-def _lag_one(desired: np.ndarray) -> np.ndarray:
-    """Shift a desired-position series forward one bar (trade AFTER the signal)."""
-    return np.concatenate([[0], desired[:-1]]).astype(int)
-
-
-def _simulate_long_flat(close: np.ndarray, desired: np.ndarray, capital: float):
-    """All-in / all-out long-flat sim: BUY uses all cash, SELL returns all to cash."""
-    n = len(close)
-    shares = np.zeros(n)
-    cash = np.zeros(n)
-    trade = [None] * n
-    trade_px = np.full(n, np.nan)
-    cur_sh, cur_cash, prev = 0.0, float(capital), 0
-    round_trips = []        # (entry_value, exit_value)
-    entry_value = None
-    for i in range(n):
-        pos = int(desired[i])
-        if pos == 1 and prev == 0:                      # BUY
-            entry_value = cur_cash
-            cur_sh, cur_cash = cur_cash / close[i], 0.0
-            trade[i], trade_px[i] = "BUY", close[i]
-        elif pos == 0 and prev == 1:                    # SELL
-            cur_cash, cur_sh = cur_sh * close[i], 0.0
-            trade[i], trade_px[i] = "SELL", close[i]
-            if entry_value is not None:
-                round_trips.append((entry_value, cur_cash))
-                entry_value = None
-        shares[i], cash[i] = cur_sh, cur_cash
-        prev = pos
-    if entry_value is not None:  # mark the still-open position to the final close
-        round_trips.append((entry_value, cur_sh * close[-1]))
-    return shares, cash, trade, trade_px, round_trips
-
-
-def _simulate_dca(close: np.ndarray, capital: float, amount: float, every_n: int):
-    n = len(close)
-    shares = np.zeros(n)
-    cash = np.zeros(n)
-    trade = [None] * n
-    trade_px = np.full(n, np.nan)
-    cur_sh, cur_cash = 0.0, float(capital)
-    for i in range(n):
-        if i % every_n == 0 and cur_cash >= amount:
-            cur_sh += amount / close[i]
-            cur_cash -= amount
-            trade[i], trade_px[i] = "BUY", close[i]
-        shares[i], cash[i] = cur_sh, cur_cash
-    return shares, cash, trade, trade_px, []     # DCA has no closed round-trips
-
-
-# --- Backtest engine ---------------------------------------------------------
-def run_backtest(ticker, strategy, params, capital, start, end):
-    """Return (enriched_df, periodic_df, stats) for one configuration."""
-    df = PRICES_LONG[
-        (PRICES_LONG["Ticker"] == ticker)
-        & (PRICES_LONG["Date"] >= start)
-        & (PRICES_LONG["Date"] <= end)
-    ].sort_values("Date").reset_index(drop=True)
-    if df.empty:
-        raise RuntimeError(f"No data for {ticker} in {start.date()}..{end.date()}.")
-
-    close = df["Close"].to_numpy()
-    overlays: dict[str, np.ndarray] = {}
-
-    if strategy == "sma":
-        fast_i, slow_i = int(params["fast"]), int(params["slow"])
-        if slow_i <= fast_i:  # keep windows ordered so the crossover stays meaningful
-            slow_i = fast_i + 1
-        desired, overlays = _sma_signals(df, fast_i, slow_i)
-        desired = _lag_one(desired)  # execute the bar after the signal (no lookahead)
-        shares, cash, trade, trade_px, round_trips = _simulate_long_flat(close, desired, capital)
-    elif strategy == "dip":
-        desired, overlays = _dip_signals(
-            df, float(params["drop_pct"]), float(params["recover_pct"]), int(params["lookback"])
-        )
-        desired = _lag_one(desired)  # execute the bar after the signal (no lookahead)
-        shares, cash, trade, trade_px, round_trips = _simulate_long_flat(close, desired, capital)
-    else:  # dca
-        shares, cash, trade, trade_px, round_trips = _simulate_dca(
-            close, capital, float(params["amount"]), max(1, int(params["every_n"]))
-        )
-
-    equity = shares * close + cash
-    bh_equity = capital * close / close[0]
-    peak = np.maximum.accumulate(equity)
-    drawdown = equity / peak - 1.0
-    in_market = shares * close
-
-    enriched = pd.DataFrame({
-        "Date": df["Date"].to_numpy(),
-        "Ticker": ticker,
-        "Close": close,
-        "Trade": trade,
-        "TradePrice": trade_px,
-        "Shares": shares,
-        "Cash": cash,
-        "Strategy_Equity": equity,
-        "BuyHold_Equity": bh_equity,
-        "ExpInMarket": in_market / equity,
-        "ExpCash": cash / equity,
-        "Drawdown": drawdown,
-    })
-    for name, arr in overlays.items():
-        enriched[name] = arr
-
-    # Monthly returns (static summary bar chart).
-    eq_series = pd.Series(equity, index=pd.DatetimeIndex(df["Date"]))
-    monthly = eq_series.resample("ME").last().pct_change().dropna()
-    periodic_df = pd.DataFrame(
-        {"Period": monthly.index.strftime("%Y-%m"), "PeriodReturn": monthly.to_numpy()}
-    )
-
-    wins = sum(1 for ev, xv in round_trips if xv > ev)
-    win_rate = (wins / len(round_trips)) if round_trips else None
-    stats = {
-        "final_value": float(equity[-1]),
-        "total_return": float(equity[-1] / capital - 1.0),
-        "vs_bh": float(equity[-1] / bh_equity[-1] - 1.0),
-        "max_drawdown": float(drawdown.min()),
-        "n_trades": int(sum(1 for t in trade if t == "BUY")),
-        "win_rate": win_rate,
-    }
-    return enriched, periodic_df, stats
 
 
 def _add_replay_time(df: pd.DataFrame, seconds: float):
@@ -282,7 +83,10 @@ def _add_replay_time(df: pd.DataFrame, seconds: float):
 # --- Build one run: enriched table + replayer + figures + KPI tables ----------
 def build_run(ticker, strategy, params, capital, start, end):
     capital = float(capital) if capital else 10_000.0
-    enriched_df, periodic_df, stats = run_backtest(ticker, strategy, params, capital, start, end)
+    df = slice_universe(PRICES_LONG, ticker, start, end)
+    if df.empty:
+        raise RuntimeError(f"No data for {ticker} in {start.date()}..{end.date()}.")
+    enriched_df, periodic_df, stats = run_backtest(df, strategy, params, capital)
     enriched_df, r_start, r_end = _add_replay_time(enriched_df, REPLAY_SECONDS)
     enriched_tbl = dhpd.to_table(enriched_df)
 
@@ -290,7 +94,7 @@ def build_run(ticker, strategy, params, capital, start, end):
     live = replayer.add_table(enriched_tbl, "ReplayTime")
     replayer.start()
 
-    overlays = OVERLAYS[strategy]
+    overlays = STRATEGY_OVERLAYS[strategy]
     equity_fig = dx.line(
         live, x="Date", y=["Strategy_Equity", "BuyHold_Equity"],
         title="Equity: Strategy vs Buy & Hold",

@@ -29,17 +29,30 @@ JavaScript or CSS required. Two dashboards ship:
 
 ```
 .
-├── Dockerfile            # Deephaven server image + project Python deps
+├── Dockerfile            # Deephaven server image + project Python deps + marketlab
 ├── docker-compose.yml    # Local service definition (web IDE on :10000)
-├── requirements.txt      # yfinance, pandas
+├── requirements.txt      # container Python deps (yfinance, pandas)
+├── requirements-dev.txt  # host-side dev deps (pytest, ruff, torch, ...)
+├── pyproject.toml        # pytest/ruff configuration
+├── .github/workflows/    # CI: ruff + pytest on every push
 ├── .dockerignore         # keeps the build context lean
 ├── .gitignore
 ├── docs/SPEC.md          # original project spec / requirements
 ├── data/                 # Deephaven data root — git-ignored, created at runtime
+├── marketlab/            # pure-Python engine package (no deephaven imports)
+│   ├── data.py           #   universe download / parquet cache / slicing
+│   └── backtest.py       #   strategy signals + portfolio accounting + run_backtest
+├── tests/                # pytest suite for marketlab (hand-computed expectations)
 └── scripts/              # mounted into the IDE "Notebooks" panel
     ├── market_sim_dashboard.py  # trading simulator (20 tickers, strategies, replay)
     └── what_if_dashboard.py     # simpler INTC buy/sell-price what-if
 ```
+
+The split matters: everything path-dependent (signals, fills, equity, drawdown)
+lives in `marketlab`, which never imports `deephaven.*` — so it runs headlessly
+under pytest on the host, while the dashboard scripts stay thin Deephaven layers
+over it. The container gets the package via `PYTHONPATH=/opt/project` plus a
+live bind-mount, so package edits apply without a rebuild.
 
 ## Prerequisites
 
@@ -87,9 +100,10 @@ multi-panel board.
   with buy/sell markers, an exposure (in-market vs cash) area chart, a live trade
   log, and a monthly-returns bar chart.
 
-How it works: the path-dependent backtest is computed in pandas/numpy (signals,
-positions with a one-bar execution lag, equity, drawdown), converted to a Deephaven
-table, given a compressed `ReplayTime` column, and replayed. The charts
+How it works: the path-dependent backtest is computed in the `marketlab` package
+(signals, positions with a one-bar execution lag, equity, drawdown — pure
+pandas/numpy, unit-tested), converted to a Deephaven table, given a compressed
+`ReplayTime` column, and replayed. The charts
 (`deephaven.plot.express`) and trade log bind to the replaying table and animate as
 it unfolds; the KPI cards show the final backtest result. The `TableReplayer`
 lifecycle is managed inside the `@ui.component` with `use_effect`/`use_ref`.
@@ -104,6 +118,20 @@ and adds `Simulated_Profit = sell_price - Close`, recomputing reactively.
 
 > Both run entirely on free historical data — no API keys. They need outbound
 > internet (from the container) for the one-time `yfinance` download.
+
+## Development & testing
+
+The engine package is developed and tested on the host — no container needed:
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements-dev.txt
+.venv/bin/python -m pytest -q        # unit tests (hand-computed expectations)
+.venv/bin/python -m ruff check .     # lint
+```
+
+The same checks run in CI ([.github/workflows/ci.yml](.github/workflows/ci.yml))
+on every push once the repo has a GitHub remote.
 
 ## Notes
 

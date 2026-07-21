@@ -1,0 +1,10 @@
+# Tool configuration only — the project is imported via PYTHONPATH (container)
+# or pytest's pythonpath (host), not installed as a distribution.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

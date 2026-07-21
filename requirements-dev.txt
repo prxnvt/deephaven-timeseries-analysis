@@ -1,0 +1,10 @@
+# Host-side dev/training environment (the container has its own requirements.txt).
+# Setup:  uv venv --python 3.12 && uv pip install -r requirements-dev.txt
+pandas
+numpy
+yfinance
+pyarrow
+torch
+matplotlib
+pytest
+ruff

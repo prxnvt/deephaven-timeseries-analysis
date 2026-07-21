@@ -16,6 +16,7 @@ services:
     volumes:
       - ./data:/data                          # Deephaven data root (persisted on the host)
       - ./scripts:/data/storage/notebooks     # Project scripts appear in the IDE "Notebooks" panel
+      - ./marketlab:/opt/project/marketlab:ro # Live-mount the package (edits apply w/o rebuild)
     restart: unless-stopped
 
     # Deephaven requires authentication. By default it generates a random
