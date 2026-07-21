@@ -190,6 +190,56 @@ To retrain from scratch (a few minutes on Apple Silicon):
 .venv/bin/python -m marketlab.train --cache data/universe_cache.parquet --out artifacts
 ```
 
+## Which generator should a risk desk trust? (VaR backtesting)
+
+`python -m marketlab.var_backtest` runs a judged bake-off: four scenario
+generators behind one interface — iid Gaussian, 20-day block bootstrap,
+hand-rolled GARCH(1,1) ([marketlab/baselines.py](marketlab/baselines.py)), and
+MarketGPT, whose per-step softmax over return buckets *is* a conditional
+distribution forecast, so its VaR is a cumulative-probability read off one
+forward pass. Every model fits on returns through 2021, then forecasts a 1-day
+95%/99% VaR for each of 10,020 pooled held-out days (2022-2023, all 20
+tickers), using only information through the prior day. Scoring is the
+regulated kind:
+
+- **Kupiec**: is the breach *rate* consistent with the target?
+- **Christoffersen**: do breaches *cluster*? (The signature of missed vol
+  dynamics — a model can pass Kupiec while dumping every breach into one bad
+  month.)
+- **Basel traffic light**: the regulatory zones for 99% VaR (breaches per 250
+  days: green < 5, yellow 5-9, red >= 10).
+
+**Pre-registered predictions** (written down before running): (1) GARCH beats
+MarketGPT on 99% calibration, because bin-mean decoding truncates tails;
+(2) the conditional models beat bootstrap/iid on Christoffersen.
+
+| model           | 95% breach rate | 99% breach rate | Kupiec p (99%) | Christoffersen p (95%) | 99% light |
+|-----------------|-----------------|-----------------|----------------|------------------------|-----------|
+| iid Gaussian    | 6.18%           | 2.46%           | 0.000          | 0.000                  | yellow    |
+| block bootstrap | 7.68%           | 1.33%           | 0.002          | 0.000                  | green     |
+| GARCH(1,1)      | 6.03%           | 2.26%           | 0.000          | **0.793**              | yellow    |
+| MarketGPT       | **5.34%**       | **1.07%**       | **0.500**      | 0.014                  | green     |
+
+**Prediction 1 was wrong, and the reason is the good part.** MarketGPT is the
+only model that passes Kupiec at both levels — near-perfect calibration —
+while GARCH breaches too often at 99%. Bin truncation damages tail *means*
+(expected shortfall), not the 1% *quantile*: the bottom quantile bins cover
+exactly that region empirically, while GARCH's normal innovations are
+structurally thin-tailed right where 99% VaR lives. Prediction 2 held for
+GARCH (Christoffersen 0.79 vs 0.000 for both unconditional models); MarketGPT
+shows mild breach clustering at 95%, consistent with its under-strength vol
+clustering in the stylized-facts panel.
+
+![VaR backtest: AAPL detail](artifacts/var_backtest.png)
+
+Honest caveats, disclosed rather than buried: the checkpoint's early stopping
+selected on validation loss over 2022-2023 — the same window this bake-off
+tests on — a mild model-selection edge for MarketGPT that the classical
+models don't get (clean fix: early-stop on 2022, test on 2023 only); GARCH
+here uses normal innovations (Student-t would likely close much of its 99%
+gap); and with n = 10,020, every model's small deviations are statistically
+visible at 95% — large samples expose everything.
+
 ## The fan-chart dashboard
 
 [`scripts/fan_chart_dashboard.py`](scripts/fan_chart_dashboard.py) puts the
@@ -239,6 +289,9 @@ on every push once the repo has a GitHub remote.
   stylized-facts evaluation and Monte-Carlo strategy robustness.
 - **Done:** the fan-chart dashboard — live in-container sampling of prefix-
   conditioned continuations with Monte-Carlo strategy KPIs.
-- **Later (optional):** GARCH/bootstrap baselines with VaR coverage backtesting,
-  joint multi-ticker generation (correlation under stress), live ticking data
+- **Done:** the generator bake-off — GARCH/bootstrap/iid baselines vs MarketGPT,
+  judged by VaR coverage backtesting (Kupiec, Christoffersen, Basel traffic
+  light) over 10k pooled held-out days.
+- **Later (optional):** Student-t GARCH + a clean 2023-only test split, joint
+  multi-ticker generation (correlation under stress), live ticking data
   (e.g. Alpaca, Alpha Vantage) into the engine.
