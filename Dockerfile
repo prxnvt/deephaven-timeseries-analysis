@@ -14,3 +14,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 # apply without a rebuild.
 COPY marketlab /opt/project/marketlab
 ENV PYTHONPATH=/opt/project
+
+# Trained MarketGPT checkpoint (~96 KB) baked in for a turnkey fan-chart demo;
+# docker-compose bind-mounts ./artifacts over it for retrain-without-rebuild.
+COPY artifacts /opt/project/artifacts

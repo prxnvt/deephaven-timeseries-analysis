@@ -1,5 +1,8 @@
 # Python dependencies installed into the Deephaven server image (see Dockerfile).
 
+# CPU-only torch wheels (keeps the image lean; no CUDA in this container).
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 # Pulls historical market data from Yahoo Finance into pandas DataFrames.
 # No API key required.
 yfinance
@@ -7,3 +10,9 @@ yfinance
 # Left unpinned on purpose: pip defers to the pandas version already bundled in
 # the Deephaven base image, avoiding a conflict with the engine's integration.
 pandas
+
+# In-container sampling from the committed MarketGPT checkpoint (fan chart).
+torch
+
+# Parquet round-trip for the universe cache.
+pyarrow

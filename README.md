@@ -4,12 +4,18 @@ A local, containerized [Deephaven](https://deephaven.io) stack for stock-market
 **"what-if"** analysis over historical price data. Prices are pulled for free from
 Yahoo Finance via [`yfinance`](https://github.com/ranaroussi/yfinance), loaded into
 live Deephaven tables, and explored through reactive `deephaven.ui` dashboards — no
-JavaScript or CSS required. Two dashboards ship:
+JavaScript or CSS required. Three dashboards ship, backed by a tested pure-Python
+engine package (`marketlab`) that also trains a small generative model of returns:
 
 - **[`market_sim_dashboard.py`](scripts/market_sim_dashboard.py)** — a full trading
   **simulator**: pick one of ~20 free-data tickers and a strategy, set capital and
   parameters, and watch it trade against an *unfolding* historical market (animated
   with Deephaven `TableReplayer`) on a Sunbird-style multi-panel board.
+- **[`fan_chart_dashboard.py`](scripts/fan_chart_dashboard.py)** — a **probability
+  cone** over a ticker's next N trading days: a tiny transformer ("MarketGPT",
+  trained on this universe — see below) is prompted with the last 60 real days and
+  sampled for hundreds of continuations, with Monte-Carlo strategy KPIs over those
+  same sampled futures.
 - **[`what_if_dashboard.py`](scripts/what_if_dashboard.py)** — the simpler baseline:
   two price sliders over a single INTC table.
 
@@ -184,6 +190,27 @@ To retrain from scratch (a few minutes on Apple Silicon):
 .venv/bin/python -m marketlab.train --cache data/universe_cache.parquet --out artifacts
 ```
 
+## The fan-chart dashboard
+
+[`scripts/fan_chart_dashboard.py`](scripts/fan_chart_dashboard.py) puts the
+generative model behind an interactive Deephaven dashboard. The committed
+checkpoint loads in-container (CPU torch); every press of **Generate** prompts
+it with the chosen ticker's last 60 real trading days and samples hundreds of
+continuation paths *live*, rendering:
+
+- the 5/25/50/75/95 **percentile cone** joined to recent real history (below,
+  the same data rendered for the README — the dashboard version is interactive);
+- **Monte-Carlo KPI cards** for a chosen strategy run over those same sampled
+  futures: P(beats buy & hold), median and 5th-percentile final value,
+  5th-percentile max drawdown.
+
+![Fan chart: AAPL continuations](artifacts/fan_chart.png)
+
+Controls: ticker, strategy, horizon (30–250 days), sampling temperature, path
+count. The caption says it plainly: the cone is a distribution, not a forecast —
+the median line is not a price target. In-container sampling of 250 paths x 250
+days takes a few seconds on Apple Silicon (native arm64 image).
+
 ## Development & testing
 
 The engine package is developed and tested on the host — no container needed:
@@ -210,9 +237,8 @@ on every push once the repo has a GitHub remote.
 - **Done:** historical backtests + an animated `TableReplayer` "unfolding market";
   tested `marketlab` engine package + CI; MarketGPT generative layer with
   stylized-facts evaluation and Monte-Carlo strategy robustness.
-- **Next:** a fan-chart dashboard — prefix-condition the model on the last 60
-  real trading days and render a probability cone of continuations, live in
-  Deephaven.
+- **Done:** the fan-chart dashboard — live in-container sampling of prefix-
+  conditioned continuations with Monte-Carlo strategy KPIs.
 - **Later (optional):** GARCH/bootstrap baselines with VaR coverage backtesting,
   joint multi-ticker generation (correlation under stress), live ticking data
   (e.g. Alpaca, Alpha Vantage) into the engine.
