@@ -23,7 +23,9 @@ JavaScript or CSS required. Two dashboards ship:
 | Engine / IDE | Deephaven Community Core (`ghcr.io/deephaven/server:latest`) |
 | Data source  | `yfinance` (Yahoo Finance) — no API key, free     |
 | UI           | `deephaven.ui` (Python-driven reactive components)|
-| Runtime      | Docker + Docker Compose                           |
+| Backtesting  | `marketlab` — pure-Python engine package, pytest-covered |
+| Generative ML| PyTorch — MarketGPT, a 21.6K-param causal transformer over return tokens |
+| Runtime      | Docker + Docker Compose; host-side training via `uv` venv |
 
 ## Project structure
 
@@ -41,7 +43,14 @@ JavaScript or CSS required. Two dashboards ship:
 ├── data/                 # Deephaven data root — git-ignored, created at runtime
 ├── marketlab/            # pure-Python engine package (no deephaven imports)
 │   ├── data.py           #   universe download / parquet cache / slicing
-│   └── backtest.py       #   strategy signals + portfolio accounting + run_backtest
+│   ├── backtest.py       #   strategy signals + portfolio accounting + run_backtest
+│   ├── tokenizer.py      #   daily returns <-> 64 quantile-bin tokens
+│   ├── model.py          #   MarketGPT: tiny causal transformer + ticker embedding
+│   ├── train.py          #   temporal-split training w/ early stopping (host-side)
+│   ├── sample.py         #   path generation: temperature, real-prefix conditioning
+│   ├── evaluate.py       #   stylized-facts metrics + comparison figure
+│   └── mc.py             #   Monte-Carlo: strategy outcomes over N synthetic paths
+├── artifacts/            # committed trained checkpoint (~96 KB) + eval figure
 ├── tests/                # pytest suite for marketlab (hand-computed expectations)
 └── scripts/              # mounted into the IDE "Notebooks" panel
     ├── market_sim_dashboard.py  # trading simulator (20 tickers, strategies, replay)
@@ -119,6 +128,62 @@ and adds `Simulated_Profit = sell_price - Close`, recomputing reactively.
 > Both run entirely on free historical data — no API keys. They need outbound
 > internet (from the container) for the one-time `yfinance` download.
 
+## The generative layer: makemore for markets
+
+`marketlab` also ships a small **generative model of daily returns** — the same
+autoregressive recipe as Karpathy's makemore, transplanted: names are sequences
+of characters, markets are sequences of return buckets. Daily log-returns are
+tokenized into 64 quantile bins (fit on training years only), and a tiny causal
+transformer (1 layer, 32-dim, 21.6K params, learned per-ticker embedding) is
+trained to predict the next day's bucket. It is explicitly **not** a price
+predictor — it's a distribution model used to generate *plausible synthetic
+market histories* for robustness testing.
+
+**Honesty bar.** Training reports validation cross-entropy against the
+*marginal baseline* (predicting every day from the unconditional training
+distribution). Bigger or lightly-regularized configs memorize 2014–2021 and
+**lose** to that baseline out-of-sample on 2022–2023; the shipped config wins,
+4.067 vs 4.159 nats/token — a small, real edge consistent with the fact that
+daily returns are mostly noise plus volatility structure.
+
+**Stylized-facts evaluation** (`python -m marketlab.evaluate`), synthetic vs
+real AAPL:
+
+![Stylized facts: real vs synthetic](artifacts/stylized_facts.png)
+
+- Raw-return autocorrelation ~0 in both — the generator doesn't hallucinate
+  predictability.
+- **Volatility clustering is genuinely learned**: mean |return|-ACF +0.073
+  synthetic vs +0.153 real (an iid generator scores ~0). Captured, but
+  under-strength — stated as-is.
+- Tails run thin (excess kurtosis 0.8 vs 5.7): decoding tokens to per-bin
+  means caps extreme moves at the outer bins' averages. A known tokenizer
+  trade-off, not a modeling win.
+- Empirical surprise: sampling temperature acts as a **regime-persistence
+  dial here, not a tail dial** — low temperature amplifies the model's
+  self-exciting volatility feedback (realized vol rises), high temperature
+  washes conditionals toward the iid marginal.
+
+**Monte-Carlo robustness** (`python -m marketlab.mc`): run a strategy over
+hundreds of generated histories and see where the real result lands. SMA(20/100)
+on AAPL, last ~3y window, $10K, 500 synthetic paths:
+
+| metric        | p5     | p50    | p95    | real   | real %ile |
+|---------------|--------|--------|--------|--------|-----------|
+| final value   | $8,046 | $19,528| $63,603| $12,159| 21%       |
+| vs buy & hold | -59%   | -30%   | +12%   | -19%   | 71%       |
+| max drawdown  | -50%   | -30%   | -18%   | -33%   | 39%       |
+
+The takeaway a single backtest can't give you: SMA's underperformance vs
+buy-and-hold on real AAPL was **not bad luck** — it underperforms in the large
+majority of plausible histories too.
+
+To retrain from scratch (a few minutes on Apple Silicon):
+
+```bash
+.venv/bin/python -m marketlab.train --cache data/universe_cache.parquet --out artifacts
+```
+
 ## Development & testing
 
 The engine package is developed and tested on the host — no container needed:
@@ -142,6 +207,12 @@ on every push once the repo has a GitHub remote.
 
 ## Roadmap
 
-- **Done:** historical backtests + an animated `TableReplayer` "unfolding market."
-- **Later (optional):** multi-ticker portfolios, more strategies, and streaming
-  live ticking market data (e.g. Alpaca, Alpha Vantage) into the engine.
+- **Done:** historical backtests + an animated `TableReplayer` "unfolding market";
+  tested `marketlab` engine package + CI; MarketGPT generative layer with
+  stylized-facts evaluation and Monte-Carlo strategy robustness.
+- **Next:** a fan-chart dashboard — prefix-condition the model on the last 60
+  real trading days and render a probability cone of continuations, live in
+  Deephaven.
+- **Later (optional):** GARCH/bootstrap baselines with VaR coverage backtesting,
+  joint multi-ticker generation (correlation under stress), live ticking data
+  (e.g. Alpaca, Alpha Vantage) into the engine.
