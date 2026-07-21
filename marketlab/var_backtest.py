@@ -179,6 +179,66 @@ def leaderboard(
     return pd.DataFrame(rows)
 
 
+def monitor_frames(
+    prices_long: pd.DataFrame,
+    ticker: str,
+    alpha: float,
+    artifacts_dir: str | None = None,
+    train_end: str = DEFAULT_TRAIN_END,
+    model_bundle: tuple | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Per-date frames for the live VaR monitor dashboard (pure pandas).
+
+    Returns (wide_df, long_df):
+      wide: Date, Return, VaR_<model>..., Breach_<model>... (ints) — chart feed.
+      long: Date, Model, Return, VaR, Breach — 1 row per model per day, feeds
+            the ticking scorecard aggregation and the breach blotter.
+
+    `model_bundle` is an already-loaded (model, tokenizer, meta) so dashboards
+    don't re-read the checkpoint on every rebuild; `artifacts_dir` is the
+    load-it-yourself alternative. Both None -> classical models only.
+    """
+    per_ticker = log_returns_by_ticker(prices_long)
+    if ticker not in per_ticker:
+        raise ValueError(f"No return history for {ticker!r}.")
+    dates, rets = per_ticker[ticker]
+    cutoff = np.datetime64(pd.Timestamp(train_end))
+    test_start = int(np.searchsorted(dates, cutoff, side="right"))
+    n_test = len(rets) - test_start
+    if test_start < MIN_TEST_OBS or n_test < MIN_TEST_OBS:
+        raise ValueError(f"Not enough history around {train_end} for {ticker!r}.")
+
+    if model_bundle is None and artifacts_dir is not None:
+        from marketlab.sample import load_artifacts
+        model_bundle = load_artifacts(artifacts_dir)
+    if model_bundle is not None:
+        model, tokenizer, meta = model_bundle
+        gpt = (MarketGPTGenerator(model, tokenizer, meta["tickers"].index(ticker))
+               if ticker in meta["tickers"] else None)
+    else:
+        gpt = None
+
+    gens = build_generators(rets[:test_start], gpt)
+    realized = rets[test_start:]
+    wide = pd.DataFrame({"Date": pd.DatetimeIndex(dates[test_start:]), "Return": realized})
+    long_parts = []
+    for name, gen in gens.items():
+        var_series = gen.var_series(rets, test_start, alpha)
+        b = breaches(realized, var_series).astype(int)
+        wide[f"VaR_{name}"] = var_series
+        wide[f"Breach_{name}"] = b
+        long_parts.append(pd.DataFrame({
+            "Date": wide["Date"], "Model": name, "Return": realized,
+            "VaR": var_series, "Breach": b,
+        }))
+    long_df = (
+        pd.concat(long_parts, ignore_index=True)
+        .sort_values(["Date", "Model"], kind="stable")
+        .reset_index(drop=True)
+    )
+    return wide, long_df
+
+
 def make_figure(prices_long: pd.DataFrame, artifacts_dir: str | None, ticker: str,
                 out_path: str, train_end: str = DEFAULT_TRAIN_END,
                 alpha: float = 0.05) -> None:

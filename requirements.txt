@@ -14,5 +14,9 @@ pandas
 # In-container sampling from the committed MarketGPT checkpoint (fan chart).
 torch
 
+# GARCH MLE + coverage-test statistics (marketlab.baselines / var_backtest),
+# used live by the VaR monitor dashboard.
+scipy
+
 # Parquet round-trip for the universe cache.
 pyarrow

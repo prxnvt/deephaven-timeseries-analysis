@@ -16,6 +16,10 @@ engine package (`marketlab`) that also trains a small generative model of return
   trained on this universe — see below) is prompted with the last 60 real days and
   sampled for hundreds of continuations, with Monte-Carlo strategy KPIs over those
   same sampled futures.
+- **[`var_monitor_dashboard.py`](scripts/var_monitor_dashboard.py)** — a **live
+  risk monitor**: the held-out 2022-2023 period replays through the engine while
+  four models' VaR forecasts, a growing breach blotter, and a ticking per-model
+  scorecard (Basel traffic-light zones) update in real time.
 - **[`what_if_dashboard.py`](scripts/what_if_dashboard.py)** — the simpler baseline:
   two price sliders over a single INTC table.
 
@@ -60,6 +64,8 @@ engine package (`marketlab`) that also trains a small generative model of return
 ├── tests/                # pytest suite for marketlab (hand-computed expectations)
 └── scripts/              # mounted into the IDE "Notebooks" panel
     ├── market_sim_dashboard.py  # trading simulator (20 tickers, strategies, replay)
+    ├── fan_chart_dashboard.py   # MarketGPT probability cone + MC strategy KPIs
+    ├── var_monitor_dashboard.py # live VaR monitor: replayed breaches + scorecard
     └── what_if_dashboard.py     # simpler INTC buy/sell-price what-if
 ```
 
@@ -240,6 +246,31 @@ here uses normal innovations (Student-t would likely close much of its 99%
 gap); and with n = 10,020, every model's small deviations are statistically
 visible at 95% — large samples expose everything.
 
+## The live VaR monitor
+
+[`scripts/var_monitor_dashboard.py`](scripts/var_monitor_dashboard.py) replays
+the bake-off the way a risk desk would experience it. The held-out 2022-2023
+period unfolds through `TableReplayer` (30/60/90s wall clock) and every panel
+is live engine machinery:
+
+- the **VaR-vs-realized chart** extends day by day — the unconditional models'
+  lines stay flat while GARCH and MarketGPT visibly deepen as 2022 volatility
+  builds;
+- the **breach blotter** grows row by row as exceptions happen, newest on top,
+  exactly like a backtesting-exceptions blotter;
+- the **live scorecard** is a ticking `agg_by` per model — days observed,
+  breaches, running breach rate vs expected, and the Basel traffic-light zone
+  flipping as breaches accumulate (every model runs hot mid-2022, which *is*
+  the point);
+- the full-period pooled leaderboard sits beside it as the static answer key.
+
+Watching the run is the Christoffersen test, animated: iid and bootstrap pile
+their breaches into the 2022 drawdown while the conditional models track it.
+All series are precomputed in `marketlab` (one batched MarketGPT forward per
+rebuild) and revealed by the replayer; swapping that precompute for per-tick
+listener inference — same panels, live model in the loop — is the natural
+next milestone.
+
 ## The fan-chart dashboard
 
 [`scripts/fan_chart_dashboard.py`](scripts/fan_chart_dashboard.py) puts the
@@ -292,6 +323,9 @@ on every push once the repo has a GitHub remote.
 - **Done:** the generator bake-off — GARCH/bootstrap/iid baselines vs MarketGPT,
   judged by VaR coverage backtesting (Kupiec, Christoffersen, Basel traffic
   light) over 10k pooled held-out days.
-- **Later (optional):** Student-t GARCH + a clean 2023-only test split, joint
+- **Done:** the live VaR monitor dashboard — the bake-off replayed with a
+  ticking scorecard, breach blotter, and traffic-light zones.
+- **Later (optional):** per-tick listener inference in the VaR monitor (live
+  model in the loop), Student-t GARCH + a clean 2023-only test split, joint
   multi-ticker generation (correlation under stress), live ticking data
   (e.g. Alpaca, Alpha Vantage) into the engine.

@@ -79,6 +79,48 @@ def test_basel_traffic_light_boundaries():
     assert basel_traffic_light(8, 500) == "green"  # 4 per 250 after scaling
 
 
+class TestMonitorFrames:
+    ALPHA = 0.05
+
+    @pytest.fixture
+    def frames(self, mini_universe):
+        from marketlab.var_backtest import monitor_frames
+        return monitor_frames(mini_universe, "AAA", self.ALPHA, train_end="2020-09-30")
+
+    def test_shapes_and_columns(self, frames):
+        wide, long_df = frames
+        models = {"iid_gaussian", "block_bootstrap", "garch11"}
+        assert {f"VaR_{m}" for m in models} <= set(wide.columns)
+        assert {f"Breach_{m}" for m in models} <= set(wide.columns)
+        assert len(long_df) == 3 * len(wide)
+        assert set(long_df["Model"]) == models
+        assert wide["Date"].is_monotonic_increasing
+        assert long_df["Date"].is_monotonic_increasing
+
+    def test_breach_definition_exact(self, frames):
+        wide, long_df = frames
+        assert (long_df["Breach"] == (long_df["Return"] < long_df["VaR"]).astype(int)).all()
+
+    def test_wide_and_long_agree(self, frames):
+        wide, long_df = frames
+        for m in ("iid_gaussian", "garch11"):
+            sub = long_df[long_df["Model"] == m].reset_index(drop=True)
+            np.testing.assert_allclose(sub["VaR"], wide[f"VaR_{m}"])
+            assert (sub["Breach"].to_numpy() == wide[f"Breach_{m}"].to_numpy()).all()
+
+    def test_99_var_deeper_than_95(self, mini_universe):
+        from marketlab.var_backtest import monitor_frames
+        wide95, _ = monitor_frames(mini_universe, "AAA", 0.05, train_end="2020-09-30")
+        wide99, _ = monitor_frames(mini_universe, "AAA", 0.01, train_end="2020-09-30")
+        for m in ("iid_gaussian", "block_bootstrap", "garch11"):
+            assert (wide99[f"VaR_{m}"] < wide95[f"VaR_{m}"]).all()
+
+    def test_unknown_ticker_raises(self, mini_universe):
+        from marketlab.var_backtest import monitor_frames
+        with pytest.raises(ValueError, match="No return history"):
+            monitor_frames(mini_universe, "ZZZ", 0.05, train_end="2020-09-30")
+
+
 def test_leaderboard_smoke_on_fixture(mini_universe):
     # No artifacts dir -> classical models only; fixture spans 2020-2021 so use
     # an in-range split with enough observations on both sides.
