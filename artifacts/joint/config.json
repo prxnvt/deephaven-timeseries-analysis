@@ -1,0 +1,46 @@
+{
+  "model": {
+    "vocab_size": 64,
+    "block_size": 240,
+    "n_layer": 2,
+    "n_head": 4,
+    "n_embd": 48,
+    "n_tickers": 20,
+    "dropout": 0.3
+  },
+  "tickers": [
+    "AAPL",
+    "AMZN",
+    "BRK-B",
+    "COST",
+    "CVX",
+    "GOOGL",
+    "HD",
+    "JNJ",
+    "JPM",
+    "KO",
+    "MA",
+    "META",
+    "MSFT",
+    "NVDA",
+    "PEP",
+    "PG",
+    "UNH",
+    "V",
+    "WMT",
+    "XOM"
+  ],
+  "train_end": "2021-12-31",
+  "val_end": "2022-12-31",
+  "metrics": {
+    "first_train_loss": 4.324948787689209,
+    "final_train_loss": 3.7784764766693115,
+    "val_ce": 3.6014814376831055,
+    "best_step": 4000,
+    "baseline_val_ce": 4.1588782974979015,
+    "n_params": 75264,
+    "steps": 4000,
+    "device": "mps",
+    "block_days": 12
+  }
+}

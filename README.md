@@ -294,6 +294,45 @@ leaderboard — the incremental math IS the backtested math, just folded. The
 breach semantics match a real desk too: an exception is only knowable when the
 new bar arrives and is compared against the forecast made the day before.
 
+## The whole market at once: joint generation
+
+Single-name sampling misses the thing that actually kills portfolios:
+correlation, and the way it tightens when volatility spikes.
+[`marketlab/joint.py`](marketlab/joint.py) fixes that with one move — **a
+trading day is a 20-token sentence** (one bucket-token per ticker in fixed
+order, days concatenated into one stream). The same causal transformer trains
+on it with per-position ticker-slot embeddings; within a day, later slots
+condition on earlier slots' *same-day* moves, so cross-sectional dependence is
+learned autoregressively — the way raster-scan image models learn 2-D
+structure.
+
+The information gain is dramatic and diagnostic: joint val CE **3.60 vs the
+4.16 marginal baseline** (the single-name model manages 4.02). Most of that
+extra half-nat is contemporaneous correlation — if the first names in the
+day's sentence are down 2%, the rest probably are too.
+
+Joint stylized facts (`python -m marketlab.joint evaluate`, real = train
+years):
+
+- **Correlation tightening under stress is reproduced** — the CCAR-relevant
+  fact. Real: mean pairwise correlation 0.10 on calm days vs 0.60 on stressed
+  days; synthetic: 0.12 vs 0.79.
+- The model **over-correlates on average** (0.67 synthetic vs 0.46 real) —
+  captured structure, overshot magnitude; stated as-is.
+- It even learns sector texture: synthetic XOM decorrelates from the basket,
+  echoing the real energy-name block.
+- **The money number**: equal-weight portfolio VaR95 from joint scenarios is
+  -5.4% daily; destroy cross-correlation in the *same* scenarios (per-name
+  shuffling) and it shrinks to -1.7%. **An independence assumption
+  understates portfolio tail risk ~3x** in the model's world — inflated
+  somewhat by the over-correlation, but the qualitative point survives at any
+  correlation near the real 0.46.
+
+![Joint correlation facts](artifacts/joint/corr_facts.png)
+
+The trained joint checkpoint (~300 KB) is committed under `artifacts/joint/`;
+retrain with `python -m marketlab.joint train`.
+
 ## The fan-chart dashboard
 
 [`scripts/fan_chart_dashboard.py`](scripts/fan_chart_dashboard.py) puts the
@@ -354,5 +393,8 @@ on every push once the repo has a GitHub remote.
 - **Done:** Student-t GARCH — the only model passing every coverage test on
   the clean protocol; the fat-tail upgrade fixes both calibration errors at
   once.
-- **Later (optional):** joint multi-ticker generation (correlation under
-  stress), live ticking data (e.g. Alpaca, Alpha Vantage) into the engine.
+- **Done:** joint multi-ticker generation — a trading day as a 20-token
+  sentence; stress-correlation reproduced, independence shown to understate
+  portfolio VaR ~3x.
+- **Later (optional):** live ticking data (e.g. Alpaca, Alpha Vantage) into
+  the engine.

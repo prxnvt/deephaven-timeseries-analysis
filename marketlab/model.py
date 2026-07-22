@@ -86,15 +86,23 @@ class MarketGPT(nn.Module):
         self.head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
 
     def forward(self, idx: torch.Tensor, ticker_ids: torch.Tensor) -> torch.Tensor:
-        """idx: (B, T) token ids; ticker_ids: (B,) -> logits (B, T, vocab)."""
+        """idx: (B, T) token ids -> logits (B, T, vocab).
+
+        ticker_ids is (B,) for single-name sequences (one embedding broadcast
+        over all positions) or (B, T) for joint sequences where each position
+        belongs to a different ticker slot (a trading day flattened into one
+        token per name)."""
         B, T = idx.shape
         if T > self.cfg.block_size:
             raise ValueError(f"Sequence length {T} exceeds block_size {self.cfg.block_size}.")
         pos = torch.arange(T, device=idx.device)
+        ticker_vec = self.ticker_emb(ticker_ids)
+        if ticker_vec.dim() == 2:  # (B, C): same ticker at every position
+            ticker_vec = ticker_vec[:, None, :]
         x = (
             self.tok_emb(idx)
             + self.pos_emb(pos)[None, :, :]
-            + self.ticker_emb(ticker_ids)[:, None, :]
+            + ticker_vec
         )
         x = self.drop(x)
         for block in self.blocks:
