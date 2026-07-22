@@ -92,10 +92,42 @@ class TestGarch11:
         assert abs(np.mean(acf(s, 20))) < 0.02
 
 
+class TestGarch11T:
+    TRUE = dict(omega=4e-6, alpha=0.08, beta=0.90, nu=6.0)
+
+    @pytest.fixture(scope="module")
+    def fitted_t(self):
+        sim = simulate_garch11(4e-6, 0.08, 0.90, 8000, seed=12, dist="t", nu=6.0)
+        return Garch11(dist="t").fit(sim), sim
+
+    def test_mle_recovers_parameters(self, fitted_t):
+        gen, _ = fitted_t
+        assert gen.last_fit_converged
+        assert gen.alpha == pytest.approx(self.TRUE["alpha"], abs=0.05)
+        assert gen.beta == pytest.approx(self.TRUE["beta"], abs=0.07)
+        assert 3.5 < gen.nu < 12.0  # nu is hard to pin; true value is 6
+
+    def test_t_tail_deeper_than_normal_at_99(self, fitted_t):
+        gen_t, sim = fitted_t
+        gen_n = Garch11().fit(sim)
+        history = sim[:1000]
+        # Fat-tailed innovations push the 1% quantile deeper for the same data;
+        # at 5% the standardized-t quantile is typically SHALLOWER (variance-1
+        # rescaling thins the shoulders) - only assert the tail direction.
+        assert gen_t.var(history, 0.01) < gen_n.var(history, 0.01)
+
+    def test_invalid_dist_raises(self):
+        with pytest.raises(ValueError, match="dist"):
+            Garch11(dist="cauchy")
+
+
 @pytest.mark.parametrize("gen_factory", [
     lambda: IIDGaussian().fit(TRAIN),
     lambda: BlockBootstrap().fit(TRAIN),
     lambda: Garch11().fit(simulate_garch11(4e-6, 0.08, 0.90, 4000, seed=6)),
+    lambda: Garch11(dist="t").fit(
+        simulate_garch11(4e-6, 0.08, 0.90, 4000, seed=6, dist="t", nu=6.0)
+    ),
 ])
 def test_var_deepens_with_confidence(gen_factory):
     gen = gen_factory()

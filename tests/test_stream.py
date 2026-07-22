@@ -35,8 +35,9 @@ def tiny_gpt():
     return model, tokenizer
 
 
-def test_garch_stream_batch_parity():
-    batch = Garch11().fit(RETURNS[:TEST_START])
+@pytest.mark.parametrize("dist", ["normal", "t"])
+def test_garch_stream_batch_parity(dist):
+    batch = Garch11(dist=dist).fit(RETURNS[:TEST_START])
     expected = batch.var_series(RETURNS, TEST_START, 0.05)
 
     stream = StreamingGarch11(batch)

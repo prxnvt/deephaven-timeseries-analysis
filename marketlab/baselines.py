@@ -73,10 +73,15 @@ class BlockBootstrap:
 
 
 def simulate_garch11(omega: float, alpha: float, beta: float, n: int,
-                     seed: int = 0, mu: float = 0.0, burn: int = 500) -> np.ndarray:
-    """Simulate a GARCH(1,1) return series (raw units, normal innovations)."""
+                     seed: int = 0, mu: float = 0.0, burn: int = 500,
+                     dist: str = "normal", nu: float = 6.0) -> np.ndarray:
+    """Simulate a GARCH(1,1) return series (raw units; normal or standardized-t
+    innovations — the t draw is rescaled to unit variance)."""
     rng = np.random.default_rng(seed)
-    z = rng.normal(0.0, 1.0, n + burn)
+    if dist == "t":
+        z = rng.standard_t(nu, n + burn) * np.sqrt((nu - 2.0) / nu)
+    else:
+        z = rng.normal(0.0, 1.0, n + burn)
     sigma2 = omega / (1.0 - alpha - beta)
     out = np.empty(n + burn)
     e_prev = 0.0
@@ -87,34 +92,80 @@ def simulate_garch11(omega: float, alpha: float, beta: float, n: int,
     return out[burn:]
 
 
-def garch11_neg_loglik(params: np.ndarray, e_pct: np.ndarray) -> float:
-    """Negative log-likelihood of demeaned percent-returns under GARCH(1,1)."""
-    omega, alpha, beta = params
-    if omega <= 0 or alpha < 0 or beta < 0 or alpha + beta >= 0.999:
-        return 1e10  # penalty keeps L-BFGS-B inside the stationary region
+def _garch_sigma2_path(omega: float, alpha: float, beta: float,
+                       e_pct: np.ndarray) -> np.ndarray:
     n = len(e_pct)
     sigma2 = np.empty(n)
     sigma2[0] = e_pct.var()
     e2 = e_pct**2
     for t in range(1, n):
         sigma2[t] = omega + alpha * e2[t - 1] + beta * sigma2[t - 1]
-    return float(0.5 * np.sum(np.log(2.0 * np.pi) + np.log(sigma2) + e2 / sigma2))
+    return sigma2
+
+
+def garch11_neg_loglik(params: np.ndarray, e_pct: np.ndarray) -> float:
+    """Negative log-likelihood of demeaned percent-returns under GARCH(1,1)
+    with NORMAL innovations."""
+    omega, alpha, beta = params
+    if omega <= 0 or alpha < 0 or beta < 0 or alpha + beta >= 0.999:
+        return 1e10  # penalty keeps L-BFGS-B inside the stationary region
+    sigma2 = _garch_sigma2_path(omega, alpha, beta, e_pct)
+    return float(0.5 * np.sum(np.log(2.0 * np.pi) + np.log(sigma2) + e_pct**2 / sigma2))
+
+
+def garch11_t_neg_loglik(params: np.ndarray, e_pct: np.ndarray) -> float:
+    """Negative log-likelihood under STANDARDIZED-t innovations (unit variance,
+    nu > 2), the textbook fat-tail upgrade."""
+    from scipy.special import gammaln
+    omega, alpha, beta, nu = params
+    if omega <= 0 or alpha < 0 or beta < 0 or alpha + beta >= 0.999 or nu <= 2.05:
+        return 1e10
+    sigma2 = _garch_sigma2_path(omega, alpha, beta, e_pct)
+    z2 = e_pct**2 / sigma2
+    const = (gammaln((nu + 1.0) / 2.0) - gammaln(nu / 2.0)
+             - 0.5 * np.log(np.pi * (nu - 2.0)))
+    ll = np.sum(const - 0.5 * np.log(sigma2)
+                - ((nu + 1.0) / 2.0) * np.log1p(z2 / (nu - 2.0)))
+    return float(-ll)
 
 
 class Garch11:
-    """Hand-rolled GARCH(1,1) with normal innovations; the classical workhorse."""
+    """Hand-rolled GARCH(1,1); dist='normal' (workhorse) or 't' (standardized
+    Student-t innovations with fitted nu — the standard fat-tail upgrade)."""
+
+    def __init__(self, dist: str = "normal"):
+        if dist not in ("normal", "t"):
+            raise ValueError("dist must be 'normal' or 't'")
+        self.dist = dist
+        self.nu: float | None = None
+
+    def _z_alpha(self, alpha: float) -> float:
+        """Quantile of the (unit-variance) innovation distribution — shared by
+        the batch var paths and StreamingGarch11 so parity holds exactly."""
+        if self.dist == "t":
+            return float(stats.t.ppf(alpha, self.nu) * np.sqrt((self.nu - 2.0) / self.nu))
+        return float(stats.norm.ppf(alpha))
 
     def fit(self, returns: np.ndarray) -> "Garch11":
         r = np.asarray(returns, dtype=np.float64)
         self.mu = float(r.mean())
         e_pct = (r - self.mu) * _PCT
         var_pct = e_pct.var()
-        x0 = np.array([0.05 * var_pct, 0.05, 0.90])
-        res = optimize.minimize(
-            garch11_neg_loglik, x0, args=(e_pct,), method="L-BFGS-B",
-            bounds=[(1e-8, None), (0.0, 0.999), (0.0, 0.999)],
-        )
-        omega_pct, self.alpha, self.beta = res.x
+        if self.dist == "t":
+            x0 = np.array([0.05 * var_pct, 0.05, 0.90, 8.0])
+            res = optimize.minimize(
+                garch11_t_neg_loglik, x0, args=(e_pct,), method="L-BFGS-B",
+                bounds=[(1e-8, None), (0.0, 0.999), (0.0, 0.999), (2.1, 300.0)],
+            )
+            omega_pct, self.alpha, self.beta, self.nu = res.x
+            self.nu = float(self.nu)
+        else:
+            x0 = np.array([0.05 * var_pct, 0.05, 0.90])
+            res = optimize.minimize(
+                garch11_neg_loglik, x0, args=(e_pct,), method="L-BFGS-B",
+                bounds=[(1e-8, None), (0.0, 0.999), (0.0, 0.999)],
+            )
+            omega_pct, self.alpha, self.beta = res.x
         self.omega = float(omega_pct) / _PCT**2   # back to raw return units
         self.last_fit_converged = bool(res.success)
         return self
@@ -131,7 +182,12 @@ class Garch11:
 
     def sample(self, n_paths: int, horizon: int, seed: int | None = None) -> np.ndarray:
         rng = np.random.default_rng(seed)
-        z = rng.normal(0.0, 1.0, (n_paths, horizon))
+        if self.dist == "t":
+            z = rng.standard_t(self.nu, (n_paths, horizon)) * np.sqrt(
+                (self.nu - 2.0) / self.nu
+            )
+        else:
+            z = rng.normal(0.0, 1.0, (n_paths, horizon))
         sigma2 = np.full(n_paths, self.omega / max(1e-12, 1.0 - self.alpha - self.beta))
         e_prev = np.zeros(n_paths)
         out = np.empty((n_paths, horizon))
@@ -143,12 +199,12 @@ class Garch11:
 
     def var(self, history: np.ndarray, alpha: float) -> float:
         sigma_next = float(np.sqrt(self._filter_sigma2(history)[-1]))
-        return self.mu + sigma_next * float(stats.norm.ppf(alpha))
+        return self.mu + sigma_next * self._z_alpha(alpha)
 
     def var_series(self, returns: np.ndarray, test_start: int, alpha: float) -> np.ndarray:
         # One filter pass over the whole series; sigma2[t] uses info through t-1.
         sigma = np.sqrt(self._filter_sigma2(returns)[test_start:len(returns)])
-        return self.mu + sigma * float(stats.norm.ppf(alpha))
+        return self.mu + sigma * self._z_alpha(alpha)
 
 
 class MarketGPTGenerator:

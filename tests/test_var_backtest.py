@@ -89,10 +89,10 @@ class TestMonitorFrames:
 
     def test_shapes_and_columns(self, frames):
         wide, long_df = frames
-        models = {"iid_gaussian", "block_bootstrap", "garch11"}
+        models = {"iid_gaussian", "block_bootstrap", "garch11", "garch11_t"}
         assert {f"VaR_{m}" for m in models} <= set(wide.columns)
         assert {f"Breach_{m}" for m in models} <= set(wide.columns)
-        assert len(long_df) == 3 * len(wide)
+        assert len(long_df) == 4 * len(wide)
         assert set(long_df["Model"]) == models
         assert wide["Date"].is_monotonic_increasing
         assert long_df["Date"].is_monotonic_increasing
@@ -112,7 +112,7 @@ class TestMonitorFrames:
         from marketlab.var_backtest import monitor_frames
         wide95, _ = monitor_frames(mini_universe, "AAA", 0.05, fit_end="2020-09-30")
         wide99, _ = monitor_frames(mini_universe, "AAA", 0.01, fit_end="2020-09-30")
-        for m in ("iid_gaussian", "block_bootstrap", "garch11"):
+        for m in ("iid_gaussian", "block_bootstrap", "garch11", "garch11_t"):
             assert (wide99[f"VaR_{m}"] < wide95[f"VaR_{m}"]).all()
 
     def test_unknown_ticker_raises(self, mini_universe):
@@ -125,7 +125,9 @@ def test_leaderboard_smoke_on_fixture(mini_universe):
     # No artifacts dir -> classical models only; fixture spans 2020-2021 so use
     # an in-range split with enough observations on both sides.
     table = leaderboard(mini_universe, artifacts_dir=None, fit_end="2020-09-30")
-    assert set(table["model"]) == {"iid_gaussian", "block_bootstrap", "garch11"}
+    assert set(table["model"]) == {
+        "iid_gaussian", "block_bootstrap", "garch11", "garch11_t",
+    }
     assert set(table["alpha"]) == {0.05, 0.01}
     assert (table["n_obs"] > 0).all()
     assert ((table["breach_rate"] >= 0) & (table["breach_rate"] <= 1)).all()

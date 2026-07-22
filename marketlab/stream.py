@@ -69,6 +69,7 @@ class StreamingGarch11:
         self.omega = batch.omega
         self.alpha = batch.alpha
         self.beta = batch.beta
+        self._z_alpha = batch._z_alpha  # normal or standardized-t quantile
         self._sigma2_next = self.omega / max(1e-12, 1.0 - self.alpha - self.beta)
 
     def warmup(self, returns: np.ndarray) -> None:
@@ -80,8 +81,7 @@ class StreamingGarch11:
         self._sigma2_next = self.omega + self.alpha * e2 + self.beta * self._sigma2_next
 
     def var(self, alpha: float) -> float:
-        from scipy import stats
-        return self.mu + float(np.sqrt(self._sigma2_next)) * float(stats.norm.ppf(alpha))
+        return self.mu + float(np.sqrt(self._sigma2_next)) * self._z_alpha(alpha)
 
 
 class StreamingMarketGPT:

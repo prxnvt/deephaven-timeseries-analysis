@@ -206,12 +206,12 @@ To retrain from scratch (a few minutes on Apple Silicon):
 
 ## Which generator should a risk desk trust? (VaR backtesting)
 
-`python -m marketlab.var_backtest` runs a judged bake-off: four scenario
+`python -m marketlab.var_backtest` runs a judged bake-off: five scenario
 generators behind one interface — iid Gaussian, 20-day block bootstrap,
-hand-rolled GARCH(1,1) ([marketlab/baselines.py](marketlab/baselines.py)), and
-MarketGPT, whose per-step softmax over return buckets *is* a conditional
-distribution forecast, so its VaR is a cumulative-probability read off one
-forward pass.
+hand-rolled GARCH(1,1) with normal and with Student-t innovations
+([marketlab/baselines.py](marketlab/baselines.py)), and MarketGPT, whose
+per-step softmax over return buckets *is* a conditional distribution forecast,
+so its VaR is a cumulative-probability read off one forward pass.
 
 **Leak-free protocol.** MarketGPT trains on 2014-2021 and early-stops on 2022
 only; the classical models fit on everything through 2022 (strictly *more*
@@ -227,33 +227,39 @@ prior day. Scoring is the regulated kind:
 - **Basel traffic light**: the regulatory zones for 99% VaR (breaches per 250
   days: green < 5, yellow 5-9, red >= 10).
 
-| model           | 95% breach rate | 99% breach rate | Christoffersen p (95%) | 99% light |
-|-----------------|-----------------|-----------------|------------------------|-----------|
-| iid Gaussian    | 2.42%           | 0.64%           | 0.096                  | green     |
-| block bootstrap | 3.08%           | 0.36%           | 0.026                  | green     |
-| GARCH(1,1)      | **3.94%**       | 1.40%           | **0.292**              | green     |
-| MarketGPT       | 3.84%           | 0.58%           | 0.016                  | green     |
+| model           | 95% breach rate | Kupiec p (95%) | 99% breach rate | Kupiec p (99%) | Christoffersen p (95%) | 99% light |
+|-----------------|-----------------|----------------|-----------------|----------------|------------------------|-----------|
+| iid Gaussian    | 2.42%           | 0.000          | 0.64%           | 0.006          | 0.096                  | green     |
+| block bootstrap | 3.08%           | 0.000          | 0.36%           | 0.000          | 0.026                  | green     |
+| GARCH(1,1)-N    | 3.94%           | 0.000          | 1.40%           | 0.007          | 0.292                  | green     |
+| **GARCH(1,1)-t**| **4.60%**       | **0.189**      | **0.78%**       | **0.104**      | **0.856**              | green     |
+| MarketGPT       | 3.84%           | 0.000          | 0.58%           | 0.001          | 0.016                  | green     |
 
-**The headline result is that the leakage fix changed the verdict — which is
-the whole reason such fixes matter.** An earlier run of this bake-off tested
-on 2022-2023, the same window MarketGPT's checkpoint had been early-stopped
-on (a disclosed selection caveat at the time); there, MarketGPT looked
-uniquely well calibrated, passing Kupiec at both levels while everything else
-failed. On the clean 2023-only protocol, **every model fails Kupiec at both
-levels — in the conservative direction**: all four fit on data containing
-2022's turbulence and then over-covered 2023's calm (breach rates 2.4-3.9%
-against a 5% target). Regime shift dominates model choice. GARCH, whose
-variance recursion adapts fastest, tracks the calm-down best; MarketGPT is
-second-closest at 95% and has the cleanest 99% breach independence (p=0.56),
-but under-breaches like everything else. All four are Basel-green at 99% —
-the traffic light only penalizes *excess* breaches, so over-coverage reads as
+Two findings worth the whole project. **First, the leakage fix changed the
+verdict — which is the whole reason such fixes matter.** An earlier run
+tested on 2022-2023, the same window MarketGPT's checkpoint had been
+early-stopped on (a disclosed selection caveat at the time); there, MarketGPT
+looked uniquely well calibrated. On the clean 2023-only protocol, nearly
+every model fails Kupiec **in the conservative direction**: fit on data
+containing 2022's turbulence, they over-covered 2023's calm. Regime shift
+dominates model choice; all five are Basel-green at 99% because the traffic
+light only penalizes *excess* breaches — over-coverage reads as
 compliant-but-capital-inefficient, which is exactly how a risk desk would
 describe it.
 
+**Second, the classical fat-tail upgrade wins outright.** Student-t GARCH is
+the only model passing every coverage test at both levels, and the mechanism
+is a beautiful exam answer: a *unit-variance* Student-t has thinner shoulders
+than a normal (its 5% quantile is shallower, so t-GARCH breaches more at 95%,
+offsetting the regime over-coverage) and fatter tails (its 1% quantile is
+deeper, taming normal-GARCH's 99% over-breaching). Same variance recursion,
+right innovation distribution, both calibration errors fixed at once.
+MarketGPT keeps the cleanest 99% breach independence among the rest (p=0.56)
+but under-breaches like everything except t-GARCH.
+
 ![VaR backtest: AAPL detail](artifacts/var_backtest.png)
 
-Remaining caveats, disclosed rather than buried: GARCH here uses normal
-innovations (Student-t is the standard upgrade); with n = 5,000 pooled days
+Remaining caveats, disclosed rather than buried: with n = 5,000 pooled days
 the coverage tests are powerful enough to reject economically small
 deviations; and one calm test year is one draw — the over-coverage finding
 says as much about 2023 as about the models.
@@ -345,6 +351,8 @@ on every push once the repo has a GitHub remote.
   ticking scorecard, breach blotter, and traffic-light zones, upgraded to
   per-tick listener inference (models in the loop, latency measured live,
   stream/batch parity tested).
-- **Later (optional):** Student-t GARCH, joint
-  multi-ticker generation (correlation under stress), live ticking data
-  (e.g. Alpaca, Alpha Vantage) into the engine.
+- **Done:** Student-t GARCH — the only model passing every coverage test on
+  the clean protocol; the fat-tail upgrade fixes both calibration errors at
+  once.
+- **Later (optional):** joint multi-ticker generation (correlation under
+  stress), live ticking data (e.g. Alpaca, Alpha Vantage) into the engine.

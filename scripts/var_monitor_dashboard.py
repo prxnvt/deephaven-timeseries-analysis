@@ -123,6 +123,7 @@ def build_run(ticker, alpha, replay_seconds):
         "iid_gaussian": StreamingIID(IIDGaussian().fit(warm_rets)),
         "block_bootstrap": StreamingBootstrap(BlockBootstrap().fit(warm_rets)),
         "garch11": StreamingGarch11(Garch11().fit(warm_rets)),
+        "garch11_t": StreamingGarch11(Garch11(dist="t").fit(warm_rets)),
         "marketgpt": StreamingMarketGPT(
             BUNDLE[0], BUNDLE[1], BUNDLE[2]["tickers"].index(ticker)
         ),

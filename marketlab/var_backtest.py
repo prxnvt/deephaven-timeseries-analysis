@@ -114,6 +114,7 @@ def build_generators(train_returns: np.ndarray, gpt: MarketGPTGenerator | None) 
         "iid_gaussian": IIDGaussian().fit(train_returns),
         "block_bootstrap": BlockBootstrap().fit(train_returns),
         "garch11": Garch11().fit(train_returns),
+        "garch11_t": Garch11(dist="t").fit(train_returns),
     }
     if gpt is not None:
         gens["marketgpt"] = gpt
@@ -275,6 +276,7 @@ def make_figure(prices_long: pd.DataFrame, artifacts_dir: str | None, ticker: st
         "iid_gaussian": dict(color="#6b7280", ls="--", lw=1.0),
         "block_bootstrap": dict(color="#0e7c86", ls="--", lw=1.0),
         "garch11": dict(color="#1d4ed8", ls="-", lw=1.2),
+        "garch11_t": dict(color="#15803d", ls="-", lw=1.2),
         "marketgpt": dict(color="#c2410c", ls="-", lw=1.2),
     }
     markers = {"garch11": ("x", "#1d4ed8"), "marketgpt": ("o", "#c2410c")}
