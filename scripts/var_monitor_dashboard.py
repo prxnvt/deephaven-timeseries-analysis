@@ -13,9 +13,14 @@ nothing. Watching it run animates the Christoffersen story: the unconditional
 models' flat VaR lines get caught by vol spikes (e.g. the March 2023 banking
 scare), while GARCH and MarketGPT adapt.
 
-All series are precomputed in `marketlab` (pure pandas + one batched MarketGPT
-forward) and revealed by the replayer; a later milestone can swap the
-precomputed columns for per-tick listener inference with the same panels.
+THE MODEL IS IN THE LOOP: the replayer streams only raw bars (the "exchange
+feed"); a table listener reacts to each tick by advancing every model's state
+incrementally (GARCH's variance recursion is an O(1) stream fold; MarketGPT
+runs a real torch forward pass) via marketlab.stream.ForecastEngine, and
+publishes forecasts + breach events through DynamicTableWriters into the
+ticking tables the panels consume. Every VaR number on screen was computed
+AFTER its bar arrived, and per-model inference latency is measured live.
+Stream/batch parity is pinned by tests/test_stream.py.
 
 Run from the IDE Notebooks panel; binds `dashboard`. Engine-only (deephaven.*).
 """
@@ -23,14 +28,25 @@ Run from the IDE Notebooks panel; binds `dashboard`. Engine-only (deephaven.*).
 import numpy as np
 import pandas as pd
 
+from marketlab.baselines import BlockBootstrap, Garch11, IIDGaussian
 from marketlab.data import load_universe
 from marketlab.sample import load_artifacts
-from marketlab.var_backtest import DEFAULT_FIT_END, leaderboard, monitor_frames
+from marketlab.stream import (
+    ForecastEngine,
+    StreamingBootstrap,
+    StreamingGarch11,
+    StreamingIID,
+    StreamingMarketGPT,
+)
+from marketlab.train import log_returns_by_ticker
+from marketlab.var_backtest import DEFAULT_FIT_END, leaderboard
 
-from deephaven import agg
+from deephaven import DynamicTableWriter, agg
+from deephaven import dtypes as dht
 from deephaven import pandas as dhpd
 from deephaven import ui
 import deephaven.plot.express as dx
+import deephaven.table_listener as tl
 from deephaven.replay import TableReplayer
 from deephaven.time import to_j_instant
 
@@ -39,7 +55,6 @@ ARTIFACTS_DIR = "/opt/project/artifacts"
 CACHE_PATH = "/data/universe_cache.parquet"
 LEVELS = {"95": 0.05, "99": 0.01}
 DURATIONS = ("30", "60", "90")
-MODEL_ORDER = ["iid_gaussian", "block_bootstrap", "garch11", "marketgpt"]
 
 # --- Module-load state --------------------------------------------------------
 BUNDLE = load_artifacts(ARTIFACTS_DIR)          # (model, tokenizer, meta)
@@ -79,46 +94,114 @@ def _add_shared_replay_time(frames: list[pd.DataFrame], seconds: float):
 
 
 # --- One monitoring run -------------------------------------------------------
+def _to_instant(value):
+    """Robustly convert a listener-delivered Date (numpy datetime64) to a Java
+    Instant for DynamicTableWriter."""
+    try:
+        return to_j_instant(value)
+    except Exception:
+        return to_j_instant(pd.Timestamp(value, tz="UTC"))
+
+
 def build_run(ticker, alpha, replay_seconds):
-    wide_df, long_df = monitor_frames(
-        PRICES_LONG, ticker, alpha, model_bundle=BUNDLE, fit_end=DEFAULT_FIT_END
+    """Stream raw 2023 bars through a replayer; a listener runs every model
+    per tick via ForecastEngine and publishes forecasts + breach events.
+    Returns (panel dict, cleanup_fn)."""
+    dates, rets = log_returns_by_ticker(
+        PRICES_LONG[PRICES_LONG["Ticker"] == ticker]
+    )[ticker]
+    closes = (
+        PRICES_LONG[PRICES_LONG["Ticker"] == ticker]
+        .sort_values("Date")["Close"].to_numpy(dtype=np.float64)[1:]  # align w/ rets
     )
-    (wide_df, long_df), r_start, r_end = _add_shared_replay_time(
-        [wide_df, long_df], replay_seconds
-    )
-    wide_tbl = dhpd.to_table(wide_df)
-    long_tbl = dhpd.to_table(long_df)
+    cutoff = np.datetime64(pd.Timestamp(DEFAULT_FIT_END))
+    test_start = int(np.searchsorted(dates, cutoff, side="right"))
+    warm_rets = rets[:test_start]
 
+    # Fit classical models on the warmup window; wrap everything as streams.
+    engine = ForecastEngine({
+        "iid_gaussian": StreamingIID(IIDGaussian().fit(warm_rets)),
+        "block_bootstrap": StreamingBootstrap(BlockBootstrap().fit(warm_rets)),
+        "garch11": StreamingGarch11(Garch11().fit(warm_rets)),
+        "marketgpt": StreamingMarketGPT(
+            BUNDLE[0], BUNDLE[1], BUNDLE[2]["tickers"].index(ticker)
+        ),
+    })
+    engine.warmup(warm_rets)  # GARCH folds history; MarketGPT primes its context
+
+    # The "exchange feed": raw test-period bars on a compressed replay clock.
+    raw_df = pd.DataFrame({
+        "Date": pd.DatetimeIndex(dates[test_start:]),
+        "Return": rets[test_start:],
+        "Close": closes[test_start:],
+    })
+    (raw_df,), r_start, r_end = _add_shared_replay_time([raw_df], replay_seconds)
     replayer = TableReplayer(r_start, r_end)
-    live_wide = replayer.add_table(wide_tbl, "ReplayTime")
-    live_long = replayer.add_table(long_tbl, "ReplayTime")
-    replayer.start()
+    live_raw = replayer.add_table(dhpd.to_table(raw_df), "ReplayTime")
 
-    var_cols = [f"VaR_{m}" for m in MODEL_ORDER]
-    var_lines = dx.line(
-        live_wide, x="Date", y=["Return"] + var_cols,
-        title=f"1-day VaR{int((1 - alpha) * 100)} forecasts vs realized returns",
+    fc_writer = DynamicTableWriter({
+        "Date": dht.Instant, "Model": dht.string,
+        "VaR95": dht.double, "VaR99": dht.double, "LatencyMs": dht.double,
+    })
+    br_writer = DynamicTableWriter({
+        "Date": dht.Instant, "Model": dht.string,
+        "Return": dht.double, "VaR": dht.double, "Level": dht.int64,
+    })
+
+    def _on_update(update, is_replay):
+        added = update.added()
+        if not added or "Return" not in added:
+            return
+        for i in range(len(added["Return"])):
+            date = _to_instant(added["Date"][i])
+            forecasts, breach_rows = engine.on_bar(date, float(added["Return"][i]))
+            for b in breach_rows:
+                br_writer.write_row(b["Date"], b["Model"], b["Return"], b["VaR"],
+                                    b["Level"])
+            for f in forecasts:
+                fc_writer.write_row(f["Date"], f["Model"], f["VaR95"], f["VaR99"],
+                                    f["LatencyMs"])
+
+    handle = tl.listen(live_raw, _on_update)
+    replayer.start()  # start AFTER the listener is registered: no missed bars
+
+    forecasts_tbl = fc_writer.table
+    breach_tbl = br_writer.table
+    level = int(round((1.0 - alpha) * 100))
+    var_col = f"VaR{level}"
+
+    realized_line = dx.line(
+        live_raw, x="Date", y="Return",
+        title=f"1-day VaR{level} forecasts vs realized returns (computed per tick)",
     )
+    var_lines = dx.line(forecasts_tbl, x="Date", y=var_col, by="Model")
     try:
         markers = dx.scatter(
-            live_long.where("Breach = 1 && (Model == `garch11` || Model == `marketgpt`)"),
+            breach_tbl.where(f"Level = {level} && "
+                             "(Model == `garch11` || Model == `marketgpt`)"),
             x="Date", y="Return", by="Model",
         )
-        chart = dx.layer(var_lines, markers)
+        chart = dx.layer(realized_line, var_lines, markers)
     except Exception:
-        chart = var_lines
+        chart = dx.layer(realized_line, var_lines)
 
     blotter = (
-        live_long.where("Breach = 1")
+        breach_tbl.where(f"Level = {level}")
         .view(["Date", "Model", "Return", "VaR"])
         .reverse()  # newest exception on top, like a real blotter
     )
 
     scorecard = (
-        live_long.agg_by(
-            [agg.count_("Days"), agg.sum_(["Breaches = Breach"])], by=["Model"]
+        forecasts_tbl.agg_by(
+            [agg.count_("Days"), agg.avg(["AvgLatencyMs = LatencyMs"])],
+            by=["Model"],
+        )
+        .natural_join(
+            breach_tbl.where(f"Level = {level}").count_by("Breaches", by=["Model"]),
+            on=["Model"],
         )
         .update([
+            "Breaches = isNull(Breaches) ? 0 : Breaches",
             "BreachRate = Breaches / (double) Days",
             f"Expected = {alpha}",
             "Per250 = Breaches * 250.0 / Days",
@@ -127,7 +210,14 @@ def build_run(ticker, alpha, replay_seconds):
         .sort("Model")
     )
 
-    return {"chart": chart, "blotter": blotter, "scorecard": scorecard}, replayer
+    def _cleanup_run():
+        for step in (handle.stop, replayer.shutdown, fc_writer.close, br_writer.close):
+            try:
+                step()
+            except Exception:
+                pass
+
+    return {"chart": chart, "blotter": blotter, "scorecard": scorecard}, _cleanup_run
 
 
 # --- The dashboard component ---------------------------------------------------
@@ -139,38 +229,31 @@ def var_monitor():
     nonce, set_nonce = ui.use_state(0)
 
     run, set_run = ui.use_state(None)
-    replayer_ref = ui.use_ref(None)
+    cleanup_ref = ui.use_ref(None)  # tears down listener + replayer + writers
     run_in_context = ui.use_execution_context()
 
     config_key = (ticker, level, duration, nonce)
 
-    def _build_and_publish():
-        if replayer_ref.current is not None:
+    def _teardown_current():
+        if cleanup_ref.current is not None:
             try:
-                replayer_ref.current.shutdown()
+                cleanup_ref.current()
             except Exception:
                 pass
-            replayer_ref.current = None
+            cleanup_ref.current = None
+
+    def _build_and_publish():
+        _teardown_current()
         try:
-            new_run, replayer = build_run(ticker, LEVELS[level], float(duration))
-            replayer_ref.current = replayer
+            new_run, cleanup_fn = build_run(ticker, LEVELS[level], float(duration))
+            cleanup_ref.current = cleanup_fn
             set_run(new_run)
         except Exception as exc:  # degrade gracefully instead of throwing in render
             set_run({"error": str(exc)})
 
     def _effect():
         run_in_context(_build_and_publish)
-
-        def _cleanup():
-            rp = replayer_ref.current
-            if rp is not None:
-                try:
-                    rp.shutdown()
-                except Exception:
-                    pass
-                replayer_ref.current = None
-
-        return _cleanup
+        return _teardown_current
 
     ui.use_effect(_effect, [config_key])
 
