@@ -14,6 +14,11 @@ tests:
   * Basel traffic light: the regulatory bucketing of 99% VaR models by breach
     count per 250 trading days (green < 5, yellow 5-9, red >= 10).
 
+Protocol (leak-free): MarketGPT trains on <= 2021 and early-stops on 2022 only;
+the classical models fit on everything <= --fit-end (2022-12-31 by default —
+strictly MORE data than MarketGPT's gradients ever saw); all models are then
+tested on 2023, which nothing was trained, fit, or selected on.
+
 CLI:
     .venv/bin/python -m marketlab.var_backtest --cache data/universe_cache.parquet
 """
@@ -31,7 +36,8 @@ from marketlab.baselines import BlockBootstrap, Garch11, IIDGaussian, MarketGPTG
 from marketlab.data import load_universe
 from marketlab.train import log_returns_by_ticker
 
-DEFAULT_TRAIN_END = "2021-12-31"   # matches the MarketGPT training split
+DEFAULT_TRAIN_END = "2021-12-31"   # MarketGPT's gradient-training boundary
+DEFAULT_FIT_END = "2022-12-31"     # classical models fit through here; test = 2023+
 ALPHAS = (0.05, 0.01)
 MIN_TEST_OBS = 100                 # skip tickers with less held-out history
 
@@ -117,12 +123,17 @@ def build_generators(train_returns: np.ndarray, gpt: MarketGPTGenerator | None) 
 def leaderboard(
     prices_long: pd.DataFrame,
     artifacts_dir: str | None,
-    train_end: str = DEFAULT_TRAIN_END,
+    fit_end: str = DEFAULT_FIT_END,
     alphas: tuple[float, ...] = ALPHAS,
 ) -> pd.DataFrame:
-    """Pooled coverage results per (model, alpha) across all usable tickers."""
+    """Pooled coverage results per (model, alpha) across all usable tickers.
+
+    Classical models fit on returns <= fit_end; every model is tested strictly
+    after it. MarketGPT stays frozen (trained <= 2021, selected on 2022), so
+    with the default fit_end the baselines see strictly more fitting data.
+    """
     per_ticker = log_returns_by_ticker(prices_long)
-    cutoff = np.datetime64(pd.Timestamp(train_end))
+    cutoff = np.datetime64(pd.Timestamp(fit_end))
 
     if artifacts_dir is not None:
         from marketlab.sample import load_artifacts
@@ -184,7 +195,7 @@ def monitor_frames(
     ticker: str,
     alpha: float,
     artifacts_dir: str | None = None,
-    train_end: str = DEFAULT_TRAIN_END,
+    fit_end: str = DEFAULT_FIT_END,
     model_bundle: tuple | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Per-date frames for the live VaR monitor dashboard (pure pandas).
@@ -202,11 +213,11 @@ def monitor_frames(
     if ticker not in per_ticker:
         raise ValueError(f"No return history for {ticker!r}.")
     dates, rets = per_ticker[ticker]
-    cutoff = np.datetime64(pd.Timestamp(train_end))
+    cutoff = np.datetime64(pd.Timestamp(fit_end))
     test_start = int(np.searchsorted(dates, cutoff, side="right"))
     n_test = len(rets) - test_start
     if test_start < MIN_TEST_OBS or n_test < MIN_TEST_OBS:
-        raise ValueError(f"Not enough history around {train_end} for {ticker!r}.")
+        raise ValueError(f"Not enough history around {fit_end} for {ticker!r}.")
 
     if model_bundle is None and artifacts_dir is not None:
         from marketlab.sample import load_artifacts
@@ -240,7 +251,7 @@ def monitor_frames(
 
 
 def make_figure(prices_long: pd.DataFrame, artifacts_dir: str | None, ticker: str,
-                out_path: str, train_end: str = DEFAULT_TRAIN_END,
+                out_path: str, fit_end: str = DEFAULT_FIT_END,
                 alpha: float = 0.05) -> None:
     """Held-out realized returns vs each model's rolling 95% VaR, breaches marked."""
     import matplotlib
@@ -249,7 +260,7 @@ def make_figure(prices_long: pd.DataFrame, artifacts_dir: str | None, ticker: st
 
     per_ticker = log_returns_by_ticker(prices_long)
     dates, rets = per_ticker[ticker]
-    cutoff = np.datetime64(pd.Timestamp(train_end))
+    cutoff = np.datetime64(pd.Timestamp(fit_end))
     test_start = int(np.searchsorted(dates, cutoff, side="right"))
     realized = rets[test_start:]
     test_dates = pd.DatetimeIndex(dates[test_start:])
@@ -289,13 +300,14 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--artifacts", default="artifacts")
     ap.add_argument("--cache", default="data/universe_cache.parquet")
-    ap.add_argument("--train-end", default=DEFAULT_TRAIN_END)
+    ap.add_argument("--fit-end", default=DEFAULT_FIT_END,
+                    help="classical models fit through here; all models test after it")
     ap.add_argument("--ticker", default="AAPL", help="detail figure ticker")
     ap.add_argument("--figure", default="artifacts/var_backtest.png")
     args = ap.parse_args(argv)
 
     prices = load_universe(args.cache)
-    table = leaderboard(prices, args.artifacts, args.train_end)
+    table = leaderboard(prices, args.artifacts, args.fit_end)
     with pd.option_context("display.float_format", "{:.4f}".format,
                            "display.width", 140):
         print(table.to_string(index=False))
@@ -304,7 +316,7 @@ def main(argv: list[str] | None = None) -> None:
           "Low p = reject the model. traffic_light: Basel zones for 99% VaR "
           "(breaches per 250 days: green<5, yellow 5-9, red>=10).")
 
-    make_figure(prices, args.artifacts, args.ticker, args.figure, args.train_end)
+    make_figure(prices, args.artifacts, args.ticker, args.figure, args.fit_end)
     print(f"figure written to {args.figure}")
 
 

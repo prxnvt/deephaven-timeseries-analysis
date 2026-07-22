@@ -1,15 +1,17 @@
 """Live VaR monitor — the rung-2 bake-off replayed as a risk desk would see it.
 
-The 2022-2023 held-out period unfolds through Deephaven's TableReplayer: four
+The untouched 2023 test year unfolds through Deephaven's TableReplayer: four
 models' 1-day VaR lines against realized returns, a breach blotter that grows
 as exceptions happen, and a per-model scorecard (breach counts, rates, Basel
 traffic-light zone) that ticks live via engine aggregations. The static pooled
 leaderboard — the full-period "answer key" with Kupiec/Christoffersen p-values
 — sits alongside.
 
-Watching it run IS the Christoffersen test, animated: the unconditional models
-(iid, bootstrap) pile their breaches into the 2022 drawdown, while the
-conditional models (GARCH, MarketGPT) deepen their VaR as volatility rises.
+Leak-free protocol: MarketGPT trained on <=2021 and early-stopped on 2022 only;
+the classical models fit through 2022 (strictly more data); 2023 was seen by
+nothing. Watching it run animates the Christoffersen story: the unconditional
+models' flat VaR lines get caught by vol spikes (e.g. the March 2023 banking
+scare), while GARCH and MarketGPT adapt.
 
 All series are precomputed in `marketlab` (pure pandas + one batched MarketGPT
 forward) and revealed by the replayer; a later milestone can swap the
@@ -23,7 +25,7 @@ import pandas as pd
 
 from marketlab.data import load_universe
 from marketlab.sample import load_artifacts
-from marketlab.var_backtest import DEFAULT_TRAIN_END, leaderboard, monitor_frames
+from marketlab.var_backtest import DEFAULT_FIT_END, leaderboard, monitor_frames
 
 from deephaven import agg
 from deephaven import pandas as dhpd
@@ -79,7 +81,7 @@ def _add_shared_replay_time(frames: list[pd.DataFrame], seconds: float):
 # --- One monitoring run -------------------------------------------------------
 def build_run(ticker, alpha, replay_seconds):
     wide_df, long_df = monitor_frames(
-        PRICES_LONG, ticker, alpha, model_bundle=BUNDLE, train_end=DEFAULT_TRAIN_END
+        PRICES_LONG, ticker, alpha, model_bundle=BUNDLE, fit_end=DEFAULT_FIT_END
     )
     (wide_df, long_df), r_start, r_end = _add_shared_replay_time(
         [wide_df, long_df], replay_seconds
@@ -188,7 +190,7 @@ def var_monitor():
         ui.button("Restart replay", on_press=lambda _e: set_nonce(nonce + 1),
                   variant="accent"),
         ui.text(
-            "Held-out 2022-2023 unfolds live. Zone = Basel traffic light "
+            "Untouched 2023 test year unfolds live. Zone = Basel traffic light "
             "(green < 5 breaches / 250d, yellow < 10, red >= 10) — calibrated "
             "for the 99% level."
         ),

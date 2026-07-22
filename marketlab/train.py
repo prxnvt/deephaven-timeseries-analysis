@@ -4,8 +4,11 @@ Usage:
     .venv/bin/python -m marketlab.train --cache data/universe_cache.parquet --out artifacts
 
 Temporal split (no leakage): the tokenizer's bins and all training windows come
-from returns dated <= --train-end; everything after is validation. The val loss
-is reported next to the *marginal baseline* — the cross-entropy of val tokens
+from returns dated <= --train-end; validation (used for early-stopping
+selection) is the window (--train-end, --val-end]; anything after --val-end is
+NEVER seen — not by gradients, not by checkpoint selection — so downstream
+evaluations (the VaR bake-off) run on genuinely untouched data. The val loss is
+reported next to the *marginal baseline* — the cross-entropy of val tokens
 under the training marginal distribution. Beating it is the evidence that the
 model learned temporal structure, not just the (baked-in) return distribution.
 """
@@ -69,12 +72,23 @@ def build_windows(
     n_bins: int = 64,
     block_size: int = 128,
     train_end: str = "2021-12-31",
+    val_end: str | None = None,
 ) -> WindowData:
+    """Three-way temporal split: train <= train_end < val <= val_end < (unseen).
+
+    Anything after `val_end` is excluded from BOTH gradient updates and
+    early-stopping selection — it stays genuinely unseen for downstream
+    evaluation (e.g. the VaR bake-off). `val_end=None` keeps the legacy
+    two-way behavior (everything after train_end is validation).
+    """
     per_ticker = log_returns_by_ticker(prices_long)
     tickers = sorted(per_ticker)
     if not tickers:
         raise ValueError("No tickers with enough history to compute returns.")
     cutoff = np.datetime64(pd.Timestamp(train_end))
+    val_cutoff = np.datetime64(pd.Timestamp(val_end)) if val_end else None
+    if val_cutoff is not None and val_cutoff <= cutoff:
+        raise ValueError("val_end must be after train_end.")
 
     train_returns = np.concatenate(
         [rets[dates <= cutoff] for dates, rets in per_ticker.values()]
@@ -86,7 +100,12 @@ def build_windows(
     for tid, ticker in enumerate(tickers):
         dates, rets = per_ticker[ticker]
         for is_train in (True, False):
-            mask = dates <= cutoff if is_train else dates > cutoff
+            if is_train:
+                mask = dates <= cutoff
+            else:
+                mask = dates > cutoff
+                if val_cutoff is not None:
+                    mask &= dates <= val_cutoff
             tokens = tokenizer.encode(rets[mask])
             x, y = _windows_from_tokens(tokens, block_size)
             key = "t" if is_train else "v"
@@ -219,7 +238,7 @@ def train(
 
 
 def save_artifacts(out_dir: str, model: MarketGPT, data: WindowData,
-                   train_end: str, metrics: dict) -> None:
+                   train_end: str, metrics: dict, val_end: str | None = None) -> None:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), out / "model.pt")
@@ -228,6 +247,7 @@ def save_artifacts(out_dir: str, model: MarketGPT, data: WindowData,
         "model": model.cfg.to_dict(),
         "tickers": data.tickers,
         "train_end": train_end,
+        "val_end": val_end,
         "metrics": metrics,
     }, indent=2))
 
@@ -251,12 +271,14 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--n-embd", type=int, default=32)
     ap.add_argument("--dropout", type=float, default=0.3)
     ap.add_argument("--train-end", default="2021-12-31")
+    ap.add_argument("--val-end", default="2022-12-31",
+                    help="early-stop selection window ends here; later data stays unseen")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=1337)
     args = ap.parse_args(argv)
 
     prices = load_universe(args.cache)
-    data = build_windows(prices, args.n_bins, args.block_size, args.train_end)
+    data = build_windows(prices, args.n_bins, args.block_size, args.train_end, args.val_end)
     cfg = ModelConfig(
         vocab_size=args.n_bins, block_size=args.block_size, n_layer=args.n_layer,
         n_head=args.n_head, n_embd=args.n_embd, n_tickers=len(data.tickers),
@@ -271,7 +293,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     print(f"val CE {metrics['val_ce']:.4f} vs marginal baseline {metrics['baseline_val_ce']:.4f} "
           f"({metrics['n_params']:,} params)")
-    save_artifacts(args.out, model, data, args.train_end, metrics)
+    save_artifacts(args.out, model, data, args.train_end, metrics, val_end=args.val_end)
     print(f"artifacts written to {args.out}/")
 
 

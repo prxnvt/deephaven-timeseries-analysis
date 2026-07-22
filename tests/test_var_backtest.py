@@ -85,7 +85,7 @@ class TestMonitorFrames:
     @pytest.fixture
     def frames(self, mini_universe):
         from marketlab.var_backtest import monitor_frames
-        return monitor_frames(mini_universe, "AAA", self.ALPHA, train_end="2020-09-30")
+        return monitor_frames(mini_universe, "AAA", self.ALPHA, fit_end="2020-09-30")
 
     def test_shapes_and_columns(self, frames):
         wide, long_df = frames
@@ -110,21 +110,21 @@ class TestMonitorFrames:
 
     def test_99_var_deeper_than_95(self, mini_universe):
         from marketlab.var_backtest import monitor_frames
-        wide95, _ = monitor_frames(mini_universe, "AAA", 0.05, train_end="2020-09-30")
-        wide99, _ = monitor_frames(mini_universe, "AAA", 0.01, train_end="2020-09-30")
+        wide95, _ = monitor_frames(mini_universe, "AAA", 0.05, fit_end="2020-09-30")
+        wide99, _ = monitor_frames(mini_universe, "AAA", 0.01, fit_end="2020-09-30")
         for m in ("iid_gaussian", "block_bootstrap", "garch11"):
             assert (wide99[f"VaR_{m}"] < wide95[f"VaR_{m}"]).all()
 
     def test_unknown_ticker_raises(self, mini_universe):
         from marketlab.var_backtest import monitor_frames
         with pytest.raises(ValueError, match="No return history"):
-            monitor_frames(mini_universe, "ZZZ", 0.05, train_end="2020-09-30")
+            monitor_frames(mini_universe, "ZZZ", 0.05, fit_end="2020-09-30")
 
 
 def test_leaderboard_smoke_on_fixture(mini_universe):
     # No artifacts dir -> classical models only; fixture spans 2020-2021 so use
     # an in-range split with enough observations on both sides.
-    table = leaderboard(mini_universe, artifacts_dir=None, train_end="2020-09-30")
+    table = leaderboard(mini_universe, artifacts_dir=None, fit_end="2020-09-30")
     assert set(table["model"]) == {"iid_gaussian", "block_bootstrap", "garch11"}
     assert set(table["alpha"]) == {0.05, 0.01}
     assert (table["n_obs"] > 0).all()

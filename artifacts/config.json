@@ -31,12 +31,13 @@
     "XOM"
   ],
   "train_end": "2021-12-31",
+  "val_end": "2022-12-31",
   "metrics": {
     "first_train_loss": 4.323005676269531,
     "final_train_loss": 4.042548656463623,
-    "val_ce": 4.066776450475057,
-    "best_step": 2800,
-    "baseline_val_ce": 4.1589087622152645,
+    "val_ce": 4.017739772796631,
+    "best_step": 3000,
+    "baseline_val_ce": 4.158878297497903,
     "n_params": 21600,
     "steps": 5000,
     "device": "mps"

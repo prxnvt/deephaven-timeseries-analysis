@@ -151,12 +151,15 @@ trained to predict the next day's bucket. It is explicitly **not** a price
 predictor — it's a distribution model used to generate *plausible synthetic
 market histories* for robustness testing.
 
-**Honesty bar.** Training reports validation cross-entropy against the
-*marginal baseline* (predicting every day from the unconditional training
-distribution). Bigger or lightly-regularized configs memorize 2014–2021 and
-**lose** to that baseline out-of-sample on 2022–2023; the shipped config wins,
-4.067 vs 4.159 nats/token — a small, real edge consistent with the fact that
-daily returns are mostly noise plus volatility structure.
+**Honesty bar.** The split is three-way and temporal: gradients see 2014–2021
+only, early stopping selects on 2022 only, and 2023 is touched by *nothing* —
+it stays clean for the VaR bake-off below. Training reports validation
+cross-entropy against the *marginal baseline* (predicting every day from the
+unconditional training distribution). Bigger or lightly-regularized configs
+memorize the training years and **lose** to that baseline out-of-sample; the
+shipped config wins, 4.018 vs 4.159 nats/token on the 2022 validation year —
+a small, real edge consistent with the fact that daily returns are mostly
+noise plus volatility structure.
 
 **Stylized-facts evaluation** (`python -m marketlab.evaluate`), synthetic vs
 real AAPL:
@@ -165,10 +168,10 @@ real AAPL:
 
 - Raw-return autocorrelation ~0 in both — the generator doesn't hallucinate
   predictability.
-- **Volatility clustering is genuinely learned**: mean |return|-ACF +0.073
+- **Volatility clustering is genuinely learned**: mean |return|-ACF +0.076
   synthetic vs +0.153 real (an iid generator scores ~0). Captured, but
   under-strength — stated as-is.
-- Tails run thin (excess kurtosis 0.8 vs 5.7): decoding tokens to per-bin
+- Tails run thin (excess kurtosis 0.5 vs 5.7): decoding tokens to per-bin
   means caps extreme moves at the outer bins' averages. A known tokenizer
   trade-off, not a modeling win.
 - Empirical surprise: sampling temperature acts as a **regime-persistence
@@ -182,9 +185,9 @@ on AAPL, last ~3y window, $10K, 500 synthetic paths:
 
 | metric        | p5     | p50    | p95    | real   | real %ile |
 |---------------|--------|--------|--------|--------|-----------|
-| final value   | $8,046 | $19,528| $63,603| $12,159| 21%       |
-| vs buy & hold | -59%   | -30%   | +12%   | -19%   | 71%       |
-| max drawdown  | -50%   | -30%   | -18%   | -33%   | 39%       |
+| final value   | $8,389 | $22,087| $83,024| $12,159| 16%       |
+| vs buy & hold | -61%   | -33%   | +12%   | -19%   | 76%       |
+| max drawdown  | -49%   | -30%   | -19%   | -33%   | 39%       |
 
 The takeaway a single backtest can't give you: SMA's underperformance vs
 buy-and-hold on real AAPL was **not bad luck** — it underperforms in the large
@@ -203,10 +206,14 @@ generators behind one interface — iid Gaussian, 20-day block bootstrap,
 hand-rolled GARCH(1,1) ([marketlab/baselines.py](marketlab/baselines.py)), and
 MarketGPT, whose per-step softmax over return buckets *is* a conditional
 distribution forecast, so its VaR is a cumulative-probability read off one
-forward pass. Every model fits on returns through 2021, then forecasts a 1-day
-95%/99% VaR for each of 10,020 pooled held-out days (2022-2023, all 20
-tickers), using only information through the prior day. Scoring is the
-regulated kind:
+forward pass.
+
+**Leak-free protocol.** MarketGPT trains on 2014-2021 and early-stops on 2022
+only; the classical models fit on everything through 2022 (strictly *more*
+data than MarketGPT's gradients ever saw); every model then forecasts a 1-day
+95%/99% VaR for each of 5,000 pooled 2023 days (all 20 tickers) — a year
+nothing was trained, fit, or selected on — using only information through the
+prior day. Scoring is the regulated kind:
 
 - **Kupiec**: is the breach *rate* consistent with the target?
 - **Christoffersen**: do breaches *cluster*? (The signature of missed vol
@@ -215,58 +222,58 @@ regulated kind:
 - **Basel traffic light**: the regulatory zones for 99% VaR (breaches per 250
   days: green < 5, yellow 5-9, red >= 10).
 
-**Pre-registered predictions** (written down before running): (1) GARCH beats
-MarketGPT on 99% calibration, because bin-mean decoding truncates tails;
-(2) the conditional models beat bootstrap/iid on Christoffersen.
+| model           | 95% breach rate | 99% breach rate | Christoffersen p (95%) | 99% light |
+|-----------------|-----------------|-----------------|------------------------|-----------|
+| iid Gaussian    | 2.42%           | 0.64%           | 0.096                  | green     |
+| block bootstrap | 3.08%           | 0.36%           | 0.026                  | green     |
+| GARCH(1,1)      | **3.94%**       | 1.40%           | **0.292**              | green     |
+| MarketGPT       | 3.84%           | 0.58%           | 0.016                  | green     |
 
-| model           | 95% breach rate | 99% breach rate | Kupiec p (99%) | Christoffersen p (95%) | 99% light |
-|-----------------|-----------------|-----------------|----------------|------------------------|-----------|
-| iid Gaussian    | 6.18%           | 2.46%           | 0.000          | 0.000                  | yellow    |
-| block bootstrap | 7.68%           | 1.33%           | 0.002          | 0.000                  | green     |
-| GARCH(1,1)      | 6.03%           | 2.26%           | 0.000          | **0.793**              | yellow    |
-| MarketGPT       | **5.34%**       | **1.07%**       | **0.500**      | 0.014                  | green     |
-
-**Prediction 1 was wrong, and the reason is the good part.** MarketGPT is the
-only model that passes Kupiec at both levels — near-perfect calibration —
-while GARCH breaches too often at 99%. Bin truncation damages tail *means*
-(expected shortfall), not the 1% *quantile*: the bottom quantile bins cover
-exactly that region empirically, while GARCH's normal innovations are
-structurally thin-tailed right where 99% VaR lives. Prediction 2 held for
-GARCH (Christoffersen 0.79 vs 0.000 for both unconditional models); MarketGPT
-shows mild breach clustering at 95%, consistent with its under-strength vol
-clustering in the stylized-facts panel.
+**The headline result is that the leakage fix changed the verdict — which is
+the whole reason such fixes matter.** An earlier run of this bake-off tested
+on 2022-2023, the same window MarketGPT's checkpoint had been early-stopped
+on (a disclosed selection caveat at the time); there, MarketGPT looked
+uniquely well calibrated, passing Kupiec at both levels while everything else
+failed. On the clean 2023-only protocol, **every model fails Kupiec at both
+levels — in the conservative direction**: all four fit on data containing
+2022's turbulence and then over-covered 2023's calm (breach rates 2.4-3.9%
+against a 5% target). Regime shift dominates model choice. GARCH, whose
+variance recursion adapts fastest, tracks the calm-down best; MarketGPT is
+second-closest at 95% and has the cleanest 99% breach independence (p=0.56),
+but under-breaches like everything else. All four are Basel-green at 99% —
+the traffic light only penalizes *excess* breaches, so over-coverage reads as
+compliant-but-capital-inefficient, which is exactly how a risk desk would
+describe it.
 
 ![VaR backtest: AAPL detail](artifacts/var_backtest.png)
 
-Honest caveats, disclosed rather than buried: the checkpoint's early stopping
-selected on validation loss over 2022-2023 — the same window this bake-off
-tests on — a mild model-selection edge for MarketGPT that the classical
-models don't get (clean fix: early-stop on 2022, test on 2023 only); GARCH
-here uses normal innovations (Student-t would likely close much of its 99%
-gap); and with n = 10,020, every model's small deviations are statistically
-visible at 95% — large samples expose everything.
+Remaining caveats, disclosed rather than buried: GARCH here uses normal
+innovations (Student-t is the standard upgrade); with n = 5,000 pooled days
+the coverage tests are powerful enough to reject economically small
+deviations; and one calm test year is one draw — the over-coverage finding
+says as much about 2023 as about the models.
 
 ## The live VaR monitor
 
 [`scripts/var_monitor_dashboard.py`](scripts/var_monitor_dashboard.py) replays
-the bake-off the way a risk desk would experience it. The held-out 2022-2023
-period unfolds through `TableReplayer` (30/60/90s wall clock) and every panel
-is live engine machinery:
+the bake-off the way a risk desk would experience it. The untouched 2023 test
+year unfolds through `TableReplayer` (30/60/90s wall clock) and every panel is
+live engine machinery:
 
 - the **VaR-vs-realized chart** extends day by day — the unconditional models'
-  lines stay flat while GARCH and MarketGPT visibly deepen as 2022 volatility
-  builds;
+  lines sit flat and too deep while GARCH and MarketGPT visibly relax as
+  2023's volatility decays (and briefly re-deepen around the March banking
+  scare);
 - the **breach blotter** grows row by row as exceptions happen, newest on top,
   exactly like a backtesting-exceptions blotter;
 - the **live scorecard** is a ticking `agg_by` per model — days observed,
   breaches, running breach rate vs expected, and the Basel traffic-light zone
-  flipping as breaches accumulate (every model runs hot mid-2022, which *is*
-  the point);
+  updating as breaches accumulate;
 - the full-period pooled leaderboard sits beside it as the static answer key.
 
-Watching the run is the Christoffersen test, animated: iid and bootstrap pile
-their breaches into the 2022 drawdown while the conditional models track it.
-All series are precomputed in `marketlab` (one batched MarketGPT forward per
+Watching the run animates the over-coverage finding: breaches are rare
+everywhere, and the flat unconditional lines waste the most capital. All
+series are precomputed in `marketlab` (one batched MarketGPT forward per
 rebuild) and revealed by the replayer; swapping that precompute for per-tick
 listener inference — same panels, live model in the loop — is the natural
 next milestone.
@@ -322,10 +329,11 @@ on every push once the repo has a GitHub remote.
   conditioned continuations with Monte-Carlo strategy KPIs.
 - **Done:** the generator bake-off — GARCH/bootstrap/iid baselines vs MarketGPT,
   judged by VaR coverage backtesting (Kupiec, Christoffersen, Basel traffic
-  light) over 10k pooled held-out days.
+  light) on a leak-free three-way split (train 2014-2021, select 2022, test
+  2023) — a fix that changed the verdict.
 - **Done:** the live VaR monitor dashboard — the bake-off replayed with a
   ticking scorecard, breach blotter, and traffic-light zones.
 - **Later (optional):** per-tick listener inference in the VaR monitor (live
-  model in the loop), Student-t GARCH + a clean 2023-only test split, joint
+  model in the loop), Student-t GARCH, joint
   multi-ticker generation (correlation under stress), live ticking data
   (e.g. Alpaca, Alpha Vantage) into the engine.
