@@ -57,13 +57,14 @@ def log_returns_by_ticker(prices_long: pd.DataFrame) -> dict[str, tuple[np.ndarr
     return out
 
 
-def _windows_from_tokens(tokens: np.ndarray, block_size: int) -> tuple[np.ndarray, np.ndarray]:
-    """All stride-1 (x, y) windows of length block_size; empty if too short."""
+def _windows_from_tokens(tokens: np.ndarray, block_size: int,
+                         stride: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    """(x, y) windows of length block_size at the given stride; empty if short."""
     n = len(tokens) - block_size
     if n <= 0:
         empty = np.empty((0, block_size), dtype=np.int64)
         return empty, empty.copy()
-    idx = np.arange(n)[:, None] + np.arange(block_size)[None, :]
+    idx = np.arange(0, n, stride)[:, None] + np.arange(block_size)[None, :]
     return tokens[idx], tokens[idx + 1]
 
 
@@ -73,6 +74,7 @@ def build_windows(
     block_size: int = 128,
     train_end: str = "2021-12-31",
     val_end: str | None = None,
+    stride: int = 1,
 ) -> WindowData:
     """Three-way temporal split: train <= train_end < val <= val_end < (unseen).
 
@@ -107,7 +109,7 @@ def build_windows(
                 if val_cutoff is not None:
                     mask &= dates <= val_cutoff
             tokens = tokenizer.encode(rets[mask])
-            x, y = _windows_from_tokens(tokens, block_size)
+            x, y = _windows_from_tokens(tokens, block_size, stride)
             key = "t" if is_train else "v"
             parts[f"x{key}"].append(x)
             parts[f"y{key}"].append(y)

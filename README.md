@@ -62,15 +62,19 @@ engine package (`marketlab`) that also trains a small generative model of return
 │   ├── sample.py         #   path generation: temperature, real-prefix conditioning
 │   ├── evaluate.py       #   stylized-facts metrics + comparison figure
 │   ├── mc.py             #   Monte-Carlo: strategy outcomes over N synthetic paths
-│   ├── baselines.py      #   iid / block-bootstrap / GARCH(1,1) + MarketGPT VaR wrapper
+│   ├── baselines.py      #   iid / bootstrap / GARCH(1,1) normal+t / MarketGPT VaR wrapper
 │   ├── var_backtest.py   #   Kupiec, Christoffersen, Basel zones, bake-off leaderboard
-│   └── stream.py         #   per-tick streaming forecasters + ForecastEngine
+│   ├── stream.py         #   per-tick streaming forecasters + ForecastEngine
+│   ├── joint.py          #   joint 20-ticker generation (a day = a 20-token sentence)
+│   ├── discriminator.py  #   real-vs-synthetic window classifier (fidelity check)
+│   └── sector_map.py     #   S&P 500 scale-up: PCA of learned ticker embeddings
 ├── artifacts/            # committed trained checkpoint (~96 KB) + eval figure
 ├── tests/                # pytest suite for marketlab (hand-computed expectations)
 └── scripts/              # mounted into the IDE "Notebooks" panel
     ├── market_sim_dashboard.py  # trading simulator (20 tickers, strategies, replay)
     ├── fan_chart_dashboard.py   # MarketGPT probability cone + MC strategy KPIs
-    ├── var_monitor_dashboard.py # live VaR monitor: replayed breaches + scorecard
+    ├── var_monitor_dashboard.py # live VaR monitor: per-tick model inference
+    ├── turing_dashboard.py      # guess the real market (vs MarketGPT)
     └── what_if_dashboard.py     # simpler INTC buy/sell-price what-if
 ```
 
@@ -332,6 +336,46 @@ years):
 
 The trained joint checkpoint (~300 KB) is committed under `artifacts/joint/`;
 retrain with `python -m marketlab.joint train`.
+
+## Can you tell which market is real?
+
+Two fidelity checks, one playful and one adversarial:
+
+- **[`scripts/turing_dashboard.py`](scripts/turing_dashboard.py)** deals two
+  charts per round — a random 120-day stretch of a real stock and a MarketGPT
+  sample for the same ticker, both indexed to 100, shuffled. Guess, then
+  press Reveal.
+- **`python -m marketlab.discriminator`** is the rigorous twin: a small MLP
+  trained to separate 4,000 real from 4,000 synthetic 60-day windows (given
+  raw returns AND explicit |return| volatility features — scale tells are
+  fair game). Held-out score: **58.3% accuracy, AUC 0.618**. A generator
+  whose output a trained adversary can barely distinguish from real data is
+  a stronger statement than any single stylized-facts table — and the gap it
+  does find is consistent with the known tells (thin tails, slightly hot
+  vol).
+
+## Does the model discover sectors? (a null result, reported as one)
+
+The hypothesis was seductive: scale the single-name model to the **S&P 500**
+(constituents + GICS labels from Wikipedia, one batched download, same tiny
+config) and its ~500 learned ticker embeddings — trained on returns alone,
+never shown a sector label — should cluster by sector.
+
+**They don't.** The judge is a permutation test built into
+`python -m marketlab.sector_map`: same-sector pairs' mean embedding cosine
+similarity minus cross-sector pairs'. Result: diff +0.0006, p = 0.38 —
+indistinguishable from shuffled labels, robust to longer/less-regularized
+training.
+
+The post-mortem is the valuable part: **a single-name model never observes
+co-movement.** Each training window is one ticker's series, so two tickers
+can only look similar through their *marginal* dynamics (vol level, drift) —
+but sector identity is fundamentally a *joint* property, carried by
+correlation. Which is exactly where it does show up: the joint model's
+correlation matrix above visibly separates the energy block. Right
+phenomenon, wrong model class — and knowing which model class can even
+express a phenomenon is the actual lesson. (The S&P 500 checkpoint is
+committed under `artifacts/sp500/` so the test is reproducible.)
 
 ## The fan-chart dashboard
 
