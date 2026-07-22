@@ -22,10 +22,13 @@ engine package (`marketlab`) that also trains a small generative model of return
   (a real torch forward for MarketGPT, an O(1) GARCH fold), publishing VaR
   forecasts, a breach blotter, and a ticking scorecard with measured
   per-model inference latency.
+- **[`turing_dashboard.py`](scripts/turing_dashboard.py)** — a **market Turing
+  test**: guess which of two indexed-to-100 charts is real history and which
+  is a MarketGPT sample; Reveal to check.
 - **[`what_if_dashboard.py`](scripts/what_if_dashboard.py)** — the simpler baseline:
   two price sliders over a single INTC table.
 
-> **Status:** working. The stack builds and runs, and both dashboards are
+> **Status:** working. The stack builds and runs; all five dashboards are
 > implemented and verified end-to-end against the live engine (Deephaven 41.7).
 
 ## Stack
@@ -87,26 +90,70 @@ live bind-mount, so package edits apply without a rebuild.
 ## Prerequisites
 
 - **Docker Engine + Docker Compose v2** — verify with `docker compose version`.
-- No API keys or cloud accounts required.
+- **[`uv`](https://docs.astral.sh/uv/)** (or plain `venv`/`pip`) if you want to
+  train models or run tests on the host — see
+  [Development & testing](#development--testing).
+- No API keys or cloud accounts required anywhere in the project.
 
-## Getting started
+## Getting started (the Deephaven stack)
 
 1. Build the custom image and start the stack:
    ```bash
    docker compose up -d
    ```
-2. On first run, grab the auto-generated pre-shared key from the logs:
+   This builds `ghcr.io/deephaven/server:latest` + `requirements.txt`
+   (`yfinance`, `pandas`, CPU `torch`, `scipy`, `pyarrow`) and copies in
+   `marketlab/` and `artifacts/` (see [Container internals](#container-internals)
+   below). First build takes a few minutes; if it hangs or times out pulling
+   the base image, retry with `docker build --pull=false -t
+   deephaven-timeseries-analysis-deephaven . && docker compose up -d` to build
+   from a locally-cached base layer instead of re-checking the registry.
+2. Wait for the container to report healthy, then grab the auto-generated
+   pre-shared key (PSK) from the logs — it regenerates on every container
+   (re)start:
    ```bash
-   docker compose logs deephaven | grep -i "pre-shared key"
+   docker compose logs deephaven | grep -oE 'use [a-z0-9]+ to connect'
    ```
-3. Open the IDE at <http://localhost:10000/ide> and paste the key when prompted.
-4. Stop the stack when done:
+3. Open the IDE at <http://localhost:10000/ide> and paste the key when
+   prompted (or open `http://localhost:10000/ide/?psk=<key>` directly).
+4. In the IDE's **Notebooks** panel (left sidebar / File Explorer), open any
+   script under `scripts/` and run it (▶ or Ctrl/Cmd+Enter) — it binds
+   `dashboard`, which the IDE renders automatically. See
+   [Project structure](#project-structure) for what each script does.
+5. Stop the stack when done:
    ```bash
-   docker compose down
+   docker compose down          # stop + remove the container
+   # or just: docker compose stop   # stop but keep it for a fast restart
    ```
 
 > Tip: to skip the per-restart key lookup, pin a fixed PSK by uncommenting the
 > `environment` block in `docker-compose.yml`.
+
+> **After editing `marketlab/` or `artifacts/`:** both are live bind-mounted
+> (`./marketlab:/opt/project/marketlab:ro`, `./artifacts:/opt/project/artifacts:ro`
+> in `docker-compose.yml`), so edits on the host apply immediately — **but**
+> the engine's Python interpreter caches imported modules for its whole
+> lifetime, so a running IDE session won't see package changes until you
+> `docker compose restart deephaven` (a fresh `exec`/notebook run afterward
+> re-imports everything cleanly). Editing `scripts/*.py` needs no restart —
+> just re-run the notebook. Only changes to `requirements.txt`, the
+> `Dockerfile`, or `docker-compose.yml` need a full rebuild
+> (`docker compose up -d --build`).
+
+## Container internals
+
+| What | Where | Why |
+|---|---|---|
+| Deephaven data root | `./data` → `/data` | Persisted on the host; git-ignored |
+| Project scripts | `./scripts` → `/data/storage/notebooks` | Shows up in the IDE Notebooks panel |
+| `marketlab` package | `./marketlab` → `/opt/project/marketlab` (`ro`) | `PYTHONPATH=/opt/project` makes it importable from the engine console |
+| Trained checkpoints | `./artifacts` → `/opt/project/artifacts` (`ro`) | Dashboards load checkpoints from here; retrain-without-rebuild |
+| Web IDE | — | `localhost:10000` (mapped from container port `10000`) |
+
+Container Python is 3.12 on a native **arm64** image on Apple Silicon (no
+emulation) — `torch` 2.13 (CPU wheels via the PyTorch CPU index in
+`requirements.txt`), `scipy` 1.18. In-container MarketGPT sampling and GARCH
+fitting both run at full native speed.
 
 ## The market simulator
 
@@ -400,17 +447,52 @@ days takes a few seconds on Apple Silicon (native arm64 image).
 
 ## Development & testing
 
-The engine package is developed and tested on the host — no container needed:
+The engine package (`marketlab`) is pure Python — pandas/numpy/torch/scipy,
+**never** `deephaven.*` — so it's developed and tested entirely on the host,
+no container needed. It targets **Python 3.12** (matching the container).
 
 ```bash
+# One-time setup
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements-dev.txt
+# (no uv? plain venv works too:)
+#   python3.12 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+
 .venv/bin/python -m pytest -q        # unit tests (hand-computed expectations)
 .venv/bin/python -m ruff check .     # lint
 ```
 
+`requirements-dev.txt` (host) vs `requirements.txt` (container): the host
+env additionally needs `matplotlib` (figures), `pytest`/`ruff` (dev tooling),
+and `lxml` (Wikipedia table parsing for `sector_map.py`) — none of which the
+running dashboards need inside the container.
+
 The same checks run in CI ([.github/workflows/ci.yml](.github/workflows/ci.yml))
-on every push once the repo has a GitHub remote.
+on every push.
+
+### Command reference
+
+Everything below runs from the repo root with `.venv/bin/python -m <module>`.
+All artifacts land under `artifacts/` (committed checkpoints/figures already
+there — these commands are for retraining or reproducing them from scratch).
+Add `-h` to any command for the full flag list.
+
+| Command | What it does |
+|---|---|
+| `pytest -q` | Full test suite (unit tests only — no Docker/engine needed) |
+| `ruff check .` | Lint |
+| `marketlab.train --cache data/universe_cache.parquet --out artifacts` | Train the single-name MarketGPT checkpoint (3-way temporal split) |
+| `marketlab.evaluate --ticker AAPL --n 200 --horizon 1000` | Stylized-facts figure + metrics vs one real ticker |
+| `marketlab.mc --ticker AAPL --strategy sma --n 500 --horizon 750` | Monte-Carlo strategy outcome distribution over synthetic paths |
+| `marketlab.var_backtest --cache data/universe_cache.parquet` | The 5-model VaR coverage bake-off (leaderboard + figure) |
+| `marketlab.joint train --cache data/universe_cache.parquet` | Train the joint 20-ticker (day-as-sentence) checkpoint |
+| `marketlab.joint evaluate --cache data/universe_cache.parquet` | Joint correlation stylized facts + portfolio-VaR comparison |
+| `marketlab.discriminator --n-per-ticker 200 --epochs 30` | Real-vs-synthetic adversarial fidelity score |
+| `marketlab.sector_map` | Full S&P 500 pipeline: download, train, permutation test, figure |
+
+The first run of any command that needs price data downloads and caches it
+under `data/*.parquet` (git-ignored); later runs reuse the cache. `data/` and
+`.venv/` are both git-ignored and safe to delete — everything regenerates.
 
 ## Notes
 
